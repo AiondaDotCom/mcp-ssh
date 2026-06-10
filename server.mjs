@@ -27,6 +27,21 @@ const execFileAsync = promisify(execFile);
 
 const isWindows = process.platform === 'win32';
 
+// Windows + Claude Desktop: extensions are launched with a stripped, allow-listed
+// environment that omits %ProgramData% and %ALLUSERSPROFILE%. Win32-OpenSSH needs
+// %ProgramData% to locate its global config (%ProgramData%\ssh\) at startup and
+// exits 255 with no output before it produces anything when the variable is unset,
+// which makes every spawned ssh/scp fail. Normalize the vars once at module load so
+// every spawned child inherits them. See issue #10.
+if (isWindows) {
+  if (!process.env.ProgramData) {
+    process.env.ProgramData = process.env.ALLUSERSPROFILE || 'C:\\ProgramData';
+  }
+  if (!process.env.ALLUSERSPROFILE) {
+    process.env.ALLUSERSPROFILE = process.env.ProgramData;
+  }
+}
+
 // Resolve an executable's absolute path on Windows by walking PATH and PATHEXT.
 // This lets us call spawn() with shell:false on Windows — without it we would
 // need shell:true to find ssh.exe/scp.exe via PATH, which would route every
