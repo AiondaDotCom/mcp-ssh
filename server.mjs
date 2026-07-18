@@ -67,6 +67,40 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
+// ---------------------------------------------------------------------------
+// ssh-config@5 value normalization.
+//
+// The parser returns a plain string for a single-token value, but an array of
+// token objects ({ val, separator, quoted }) as soon as a multi-value directive
+// carries more than one token. Affected directives (ssh-config/lib/ssh-config.js):
+//   Host, Match, ProxyCommand, SendEnv, IPQoS, CanonicalDomains,
+//   GlobalKnownHostsFile, UserKnownHostsFile
+// Everything downstream must go through these helpers, otherwise a multi-alias
+// `Host a b` block is stored with an array where a string is expected and no
+// strict comparison against it can ever match.
+// ---------------------------------------------------------------------------
+function configValueTokens(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map(v => (v && typeof v === 'object' && 'val' in v ? v.val : String(v)))
+      .filter(v => v !== '');
+  }
+  return [String(value)];
+}
+
+function configValueToString(value) {
+  return configValueTokens(value).join(' ');
+}
+
+// True if `alias` names this host — via any of its aliases or its hostname.
+function hostMatchesAlias(host, alias) {
+  if (!host || !alias) return false;
+  if (host.hostname === alias) return true;
+  if (Array.isArray(host.aliases)) return host.aliases.includes(alias);
+  return host.alias === alias;
+}
+
 // SSH Configuration Parser
 class SSHConfigParser {
   constructor() {
@@ -171,10 +205,20 @@ class SSHConfigParser {
         continue;
       }
 
-      if (section.param === 'Host' && section.value !== '*') {
+      if (section.param === 'Host') {
+        const aliases = configValueTokens(section.value);
+
+        // Skip blocks that only carry defaults (`Host *`, `Host * !bastion`):
+        // they are not connectable hosts. The old `section.value !== '*'` check
+        // missed these because a multi-token Host value is an array, never '*'.
+        if (aliases.length === 0 || aliases.every(a => a === '*' || a.startsWith('!'))) {
+          continue;
+        }
+
         const hostInfo = {
           hostname: '',
-          alias: section.value,
+          alias: aliases[0],   // first alias — keeps the existing output shape
+          aliases,             // full list — used for matching
           configFile: configPath
         };
 
@@ -195,22 +239,26 @@ class SSHConfigParser {
             continue;
           }
 
+          // Multi-token directives (ProxyCommand, SendEnv, IPQoS, …) arrive as
+          // arrays of token objects; flatten so the JSON we hand back is readable.
+          const value = configValueToString(param.value);
+
           switch (param.param.toLowerCase()) {
             case 'hostname':
-              hostInfo.hostname = param.value;
+              hostInfo.hostname = value;
               break;
             case 'user':
-              hostInfo.user = param.value;
+              hostInfo.user = value;
               break;
             case 'port':
-              hostInfo.port = parseInt(param.value, 10);
+              hostInfo.port = parseInt(value, 10);
               break;
             case 'identityfile':
-              hostInfo.identityFile = param.value;
+              hostInfo.identityFile = value;
               break;
             default:
               // Store other parameters
-              hostInfo[param.param.toLowerCase()] = param.value;
+              hostInfo[param.param.toLowerCase()] = value;
           }
         }
 
@@ -269,9 +317,7 @@ class SSHConfigParser {
     // Add hosts from known_hosts that aren't already in the config
     // These will appear after the config hosts
     for (const hostname of knownHostnames) {
-      if (!configHosts.some(host => 
-          host.hostname === hostname || 
-          host.alias === hostname)) {
+      if (!configHosts.some(host => hostMatchesAlias(host, hostname))) {
         allHosts.push({
           hostname: hostname,
           source: 'known_hosts'
@@ -323,10 +369,8 @@ class SSHClient {
     const cleanAlias = hostAlias.includes('@') ? hostAlias.split('@').pop() : hostAlias;
     const knownHosts = await this.configParser.getAllKnownHosts();
     const isKnown = knownHosts.some((host) =>
-      host.alias === hostAlias ||
-      host.hostname === hostAlias ||
-      host.alias === cleanAlias ||
-      host.hostname === cleanAlias
+      hostMatchesAlias(host, hostAlias) ||
+      hostMatchesAlias(host, cleanAlias)
     );
     if (!isKnown) {
       throw new Error(`Unknown hostAlias: ${hostAlias} is not defined in ~/.ssh/config or ~/.ssh/known_hosts`);
@@ -337,7 +381,7 @@ class SSHClient {
     // Strip user@ prefix if present (e.g. "test@ssh-test" -> "ssh-test")
     const cleanAlias = hostAlias.includes('@') ? hostAlias.split('@').pop() : hostAlias;
     const hosts = await this.configParser.processIncludeDirectives(this.configParser.configPath);
-    const host = hosts.find(h => h.alias === cleanAlias || h.hostname === cleanAlias);
+    const host = hosts.find(h => hostMatchesAlias(h, cleanAlias));
     return host?._password || null;
   }
 
@@ -470,7 +514,7 @@ class SSHClient {
 
   async getHostInfo(hostAlias) {
     const hosts = await this.configParser.processIncludeDirectives(this.configParser.configPath);
-    const host = hosts.find(host => host.alias === hostAlias || host.hostname === hostAlias) || null;
+    const host = hosts.find(host => hostMatchesAlias(host, hostAlias)) || null;
     if (host) {
       // Never expose password to the LLM
       const { _password, ...safeHost } = host;

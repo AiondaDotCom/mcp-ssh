@@ -154,6 +154,60 @@ Host myhost
       expect(hosts[0].alias).toBe('myhost');
     });
 
+    // Regression: ssh-config@5 returns a plain string for a single-token value
+    // but an array of token objects for `Host a b`. Storing that array in
+    // `alias` made every strict comparison fail, so a multi-alias host was
+    // unreachable under *any* of its names.
+    it('should expose every alias of a multi-alias Host block', () => {
+      const config = sshConfigLib.parse(`
+Host docker-lxc hlab
+    HostName 10.9.0.105
+    User root
+`);
+      const hosts = parser.extractHostsFromConfig(config, '/test');
+
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0].aliases).toEqual(['docker-lxc', 'hlab']);
+      expect(hosts[0].alias).toBe('docker-lxc');
+      expect(hosts[0].hostname).toBe('10.9.0.105');
+    });
+
+    it('should keep alias a string for single-alias hosts', () => {
+      const config = sshConfigLib.parse(`
+Host solo
+    HostName 1.2.3.4
+`);
+      const hosts = parser.extractHostsFromConfig(config, '/test');
+
+      expect(hosts[0].alias).toBe('solo');
+      expect(hosts[0].aliases).toEqual(['solo']);
+    });
+
+    it('should skip a wildcard block carrying negations', () => {
+      const config = sshConfigLib.parse(`
+Host * !bastion
+    HostName 7.7.7.7
+
+Host myhost
+    HostName 1.2.3.4
+`);
+      const hosts = parser.extractHostsFromConfig(config, '/test');
+
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0].alias).toBe('myhost');
+    });
+
+    it('should flatten multi-token directives into a string', () => {
+      const config = sshConfigLib.parse(`
+Host jump
+    HostName localhost
+    ProxyCommand ssh bastion -W %h:%p
+`);
+      const hosts = parser.extractHostsFromConfig(config, '/test');
+
+      expect(hosts[0].proxycommand).toBe('ssh bastion -W %h:%p');
+    });
+
     it('should skip Include directives', () => {
       const config = sshConfigLib.parse(SAMPLE_SSH_CONFIG_WITH_INCLUDE);
       const hosts = parser.extractHostsFromConfig(config, '/test');
