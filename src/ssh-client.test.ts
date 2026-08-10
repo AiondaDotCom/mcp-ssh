@@ -915,3 +915,33 @@ describe('remote command exit codes', () => {
     expect(result.code).toBe(0);
   });
 });
+
+describe('runRemoteCommand timeout defaulting', () => {
+  let client: TestClient;
+
+  beforeEach(() => {
+    client = new SSHClient() as unknown as TestClient;
+    vi.clearAllMocks();
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+  });
+
+  // Regression guard: `??` here would hand ssh a zero-millisecond timeout and
+  // kill the command immediately. Zero means "not specified", as it does in the
+  // tool dispatcher.
+  it('should treat a zero timeout as absent rather than immediate', async () => {
+    vi.useFakeTimers();
+    try {
+      client._spawn = createMockSpawn({ stdout: 'ok\n', code: 0 });
+      const pending = client.runRemoteCommand('test', 'echo ok', { timeout: 0 });
+
+      // Well past an immediate timeout, but far short of the 30s default.
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await pending;
+
+      expect(result.code).toBe(0);
+      expect(result.stderr).not.toContain('timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

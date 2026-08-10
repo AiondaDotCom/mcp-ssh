@@ -32,6 +32,7 @@ import type {
 const execFileAsync = promisify(execFile);
 
 const MAX_OUTPUT_SIZE = 10 * 1024 * 1024; // 10MB limit
+const DEFAULT_TIMEOUT = 30000;
 const STRICT_HOST_KEY_CHECKING = ['-o', 'StrictHostKeyChecking=accept-new'];
 
 type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -169,7 +170,10 @@ export class SSHClient {
   ): Promise<CommandResult> {
     this._assertSafeHostAlias(hostAlias);
     await this._assertKnownHostAlias(hostAlias);
-    const timeout = options.timeout ?? 30000;
+    // `||`, not `??`: a zero timeout means "not specified" here, as it does in
+    // the tool dispatcher. With `??` a caller passing 0 would get an immediate
+    // SIGTERM instead of the default.
+    const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     debugLog(`Executing: ssh ${hostAlias} ${command}\n`);
 
