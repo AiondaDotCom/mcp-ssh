@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { MockInstance } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { join, relative, dirname } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 
 // vitest scopes module mocks to the declaring file, so each test file installs
 // its own. test-helpers.ts then sees the mocked copies.
@@ -109,7 +112,8 @@ describe('SSHClient', () => {
 
       expect(posixFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('mcp-ssh-askpass'),
-        '#!/bin/sh\necho "$MCP_SSH_PASS"\n'
+        '#!/bin/sh\necho "$MCP_SSH_PASS"\n',
+        expect.objectContaining({ flag: 'wx' })
       );
     });
 
@@ -137,7 +141,8 @@ describe('SSHClient', () => {
       expect(scriptPath).toMatch(/mcp-ssh-askpass-\d+\.cmd$/);
       expect(winFs.writeFile).toHaveBeenCalledWith(
         scriptPath,
-        '@echo off\r\necho %MCP_SSH_PASS%\r\n'
+        '@echo off\r\necho %MCP_SSH_PASS%\r\n',
+        expect.objectContaining({ flag: 'wx' })
       );
     });
 
@@ -467,7 +472,7 @@ describe('SSHClient', () => {
       expect(result).toBe(true);
       expect(client._execFileAsync).toHaveBeenCalledWith(
         SCP_BIN,
-        ['-o', 'StrictHostKeyChecking=accept-new', '--', '/local/file', 'test:/remote/file'],
+        ['-o', 'StrictHostKeyChecking=accept-new', '--', '/local/file', '[test]:/remote/file'],
         expect.any(Object)
       );
     });
@@ -524,7 +529,7 @@ describe('SSHClient', () => {
       expect(result).toBe(true);
       expect(client._execFileAsync).toHaveBeenCalledWith(
         SCP_BIN,
-        ['-o', 'StrictHostKeyChecking=accept-new', '--', 'test:/remote/file', '/local/file'],
+        ['-o', 'StrictHostKeyChecking=accept-new', '--', '[test]:/remote/file', '/local/file'],
         expect.any(Object)
       );
     });
@@ -1007,7 +1012,7 @@ describe('localPath must not be an scp remote spec', () => {
     expect(result).toBe(true);
     expect(client._execFileAsync).toHaveBeenCalledWith(
       SCP_BIN,
-      ['-o', 'StrictHostKeyChecking=accept-new', '--', 'test:/etc/passwd', localPath],
+      ['-o', 'StrictHostKeyChecking=accept-new', '--', '[test]:/etc/passwd', localPath],
       expect.any(Object)
     );
   });
@@ -1060,5 +1065,244 @@ describe('localPath validation across platforms', () => {
 
     const onPosix = await clientOn('linux');
     expect(await onPosix.downloadFile('test', '/etc/passwd', 'dir\\file:name.txt')).toBe(false);
+  });
+});
+
+// =============================================================================
+// Security findings from the 2026-08 review
+// =============================================================================
+
+describe('localPath must not target the SSH configuration directory', () => {
+  // ~/.ssh/config is the trust base: it *is* the host allowlist, and ssh executes
+  // a ProxyCommand found there through /bin/sh. Letting a tool argument overwrite
+  // it turns the documented remote RCE of runRemoteCommand into local RCE:
+  //   1. runRemoteCommand(anyHost, 'cat > /tmp/x …ProxyCommand /bin/sh -c "…"…')
+  //   2. downloadFile(thatHost, '/tmp/x', '~/.ssh/config')
+  //   3. runRemoteCommand('evil', 'true')  -> ProxyCommand runs locally
+  // Step 3 was verified by hand against the real ssh binary.
+  let client: TestClient;
+
+  beforeEach(() => {
+    client = new SSHClient() as unknown as TestClient;
+    vi.clearAllMocks();
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+    client._execFileAsync = createMockExecFileAsync();
+  });
+
+  const sshDir = join(homedir(), '.ssh');
+
+  it.each([
+    ['the config itself', join(sshDir, 'config')],
+    ['known_hosts', join(sshDir, 'known_hosts')],
+    ['authorized_keys', join(sshDir, 'authorized_keys')],
+    ['a private key', join(sshDir, 'id_ed25519')],
+    ['an included config', join(sshDir, 'config.d', 'extra.conf')],
+  ])('should refuse downloadFile writing over %s', async (_label, localPath) => {
+    const result = await client.downloadFile('test', '/tmp/payload', localPath);
+
+    expect(result).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should refuse a traversal path that lands in ~/.ssh', async () => {
+    const traversal = join(sshDir, 'subdir', '..', 'config');
+
+    expect(await client.downloadFile('test', '/tmp/payload', traversal)).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should refuse a relative path that resolves into ~/.ssh', async () => {
+    const relPath = relative(process.cwd(), join(sshDir, 'config'));
+
+    expect(await client.downloadFile('test', '/tmp/payload', relPath)).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  // uploadFile only READS localPath, so the guard deliberately does not apply
+  // there: it protects the integrity of the trust base, not its confidentiality.
+  // Blocking reads would be theatre — ~/.aws/credentials and every other secret
+  // stay readable by design (see the threat model) — and would break the
+  // legitimate case of backing up one's own config to a configured host.
+  it('should still allow uploadFile to read from ~/.ssh', async () => {
+    expect(await client.uploadFile('test', join(sshDir, 'config'), '/backup/cfg')).toBe(true);
+    expect(client._execFileAsync).toHaveBeenCalled();
+  });
+
+  it('should refuse a tilde path, which is never expanded without a shell', async () => {
+    expect(await client.downloadFile('test', '/tmp/payload', '~/.ssh/config')).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should refuse a differently-cased spelling on case-insensitive filesystems', async () => {
+    // realpath does not canonicalise case on macOS/Windows, so a case-sensitive
+    // comparison is bypassable by spelling it .SSH.
+    const upper = join(homedir(), '.SSH', 'config');
+    const expected = process.platform === 'linux';  // case-sensitive FS: a real other dir
+
+    expect(await client.downloadFile('test', '/tmp/payload', upper)).toBe(expected);
+  });
+
+  it('should refuse the ssh directory itself as a destination', async () => {
+    expect(await client.downloadFile('test', '/tmp/payload', sshDir)).toBe(false);
+  });
+
+  it('should refuse a symlink that points into ~/.ssh', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-ssh-link-'));
+    const link = join(dir, 'innocent.txt');
+    try {
+      symlinkSync(join(sshDir, 'config'), link);
+    } catch {
+      rmSync(dir, { recursive: true, force: true });
+      return;  // no symlink privilege (Windows CI) — nothing to assert
+    }
+    try {
+      expect(await client.downloadFile('test', '/tmp/payload', link)).toBe(false);
+      expect(client._execFileAsync).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('should still allow paths merely containing .ssh as a substring', async () => {
+    // /tmp/.sshfoo and ~/.ssh-backup are not the SSH directory.
+    expect(await client.downloadFile('test', '/remote', '/tmp/.sshfoo/x')).toBe(true);
+  });
+
+  it('should still allow ordinary destinations', async () => {
+    expect(await client.downloadFile('test', '/remote', '/tmp/out.txt')).toBe(true);
+    expect(client._execFileAsync).toHaveBeenCalled();
+  });
+});
+
+describe('scp host is bracketed so scp cannot re-split it', () => {
+  // scp splits its remote spec on the FIRST colon, while ssh does not split its
+  // destination at all. Verified against the real binaries:
+  //   'a:b:/tmp/x'          -> connects to host 'a'         (allowlist bypass)
+  //   '2001:db8::1:/tmp/x'  -> connects to 0.0.7.209        (functional bug)
+  //   '[2001:db8::1]:/tmp/x'-> connects to 2001:db8::1      (correct)
+  let client: TestClient;
+
+  beforeEach(() => {
+    client = new SSHClient() as unknown as TestClient;
+    vi.clearAllMocks();
+    client._execFileAsync = createMockExecFileAsync();
+  });
+
+  it('should bracket a plain alias', async () => {
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+
+    await client.downloadFile('test', '/remote/f', '/local/f');
+
+    expect(client._execFileAsync).toHaveBeenCalledWith(
+      SCP_BIN,
+      ['-o', 'StrictHostKeyChecking=accept-new', '--', '[test]:/remote/f', '/local/f'],
+      expect.any(Object)
+    );
+  });
+
+  it('should keep user@ outside the bracket', async () => {
+    // scp reads '[user@host]:/p' as host 'host]' — the bracket belongs around
+    // the host only.
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+
+    await client.uploadFile('root@test', '/local/f', '/remote/f');
+
+    expect(client._execFileAsync).toHaveBeenCalledWith(
+      SCP_BIN,
+      expect.arrayContaining(['root@[test]:/remote/f']),
+      expect.any(Object)
+    );
+  });
+
+  it('should make a bare IPv6 host work instead of silently targeting another host', async () => {
+    readFile.mockResolvedValue(`Host v6\n    HostName 2001:db8::1\n`);
+
+    await client.downloadFile('2001:db8::1', '/remote/f', '/local/f');
+
+    expect(client._execFileAsync).toHaveBeenCalledWith(
+      SCP_BIN,
+      expect.arrayContaining(['[2001:db8::1]:/remote/f']),
+      expect.any(Object)
+    );
+  });
+
+  it('should stop a colon-bearing alias from redirecting scp to another host', async () => {
+    // Without brackets scp would connect to 'a', which is not what the allowlist
+    // approved.
+    readFile.mockResolvedValue(`Host a:b\n    HostName 1.2.3.4\n`);
+
+    await client.downloadFile('a:b', '/remote/f', '/local/f');
+
+    expect(client._execFileAsync).toHaveBeenCalledWith(
+      SCP_BIN,
+      expect.arrayContaining(['[a:b]:/remote/f']),
+      expect.any(Object)
+    );
+  });
+});
+
+describe('askpass script is created unpredictably and exclusively', () => {
+  // The helper is executed by ssh with MCP_SSH_PASS in its environment, so a
+  // co-located local user who can pre-place the path controls what runs and can
+  // capture the password. Not reachable by the LLM (needs a local account), but
+  // it guards a secret, so it should not sit at a guessable path.
+  let posixClient: TestClient;
+  let posixFs: MockedFs;
+
+  beforeEach(async () => {
+    const posix = await loadServerAs('linux');
+    posixClient = new posix.SSHClient() as unknown as TestClient;
+    posixFs = posix.fs;
+    posixFs.writeFile.mockResolvedValue(undefined);
+    posixFs.chmod.mockResolvedValue(undefined);
+  });
+
+  it('should not use a path derived only from the pid', async () => {
+    const scriptPath = await posixClient.getAskpassScript();
+
+    // The script must not sit directly in the shared temp dir, where its name
+    // would be guessable from the pid alone.
+    expect(dirname(scriptPath)).not.toBe(tmpdir());
+    expect(dirname(scriptPath)).toMatch(/mcp-ssh-/);
+  });
+
+  it('should create the file exclusively so an existing path is never followed', async () => {
+    await posixClient.getAskpassScript();
+
+    expect(posixFs.writeFile).toHaveBeenCalledWith(
+      expect.stringContaining('mcp-ssh-askpass'),
+      '#!/bin/sh\necho "$MCP_SSH_PASS"\n',
+      expect.objectContaining({ flag: 'wx' })
+    );
+  });
+});
+
+describe('SSH directory guard across filesystem semantics', () => {
+  async function clientOn(platform: string) {
+    const mod = await loadServerAs(platform);
+    const client = new mod.SSHClient() as unknown as TestClient;
+    mod.fs.readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+    client._execFileAsync = createMockExecFileAsync();
+    return client;
+  }
+
+  it('should compare case-sensitively on Linux, where .SSH is a different directory', async () => {
+    const client = await clientOn('linux');
+    const upper = join(homedir(), '.SSH', 'config');
+
+    expect(await client.downloadFile('test', '/remote', upper)).toBe(true);
+  });
+
+  it('should still block the real directory on Linux', async () => {
+    const client = await clientOn('linux');
+
+    expect(await client.downloadFile('test', '/remote', join(homedir(), '.ssh', 'config'))).toBe(false);
+  });
+
+  it('should accept a destination whose top-level directory does not exist', async () => {
+    // Exercises the fall-through in the prefix walk: nothing on the path resolves.
+    const client = await clientOn('linux');
+
+    expect(await client.downloadFile('test', '/remote', '/no-such-top-level-xyz/a/b.txt')).toBe(true);
   });
 });

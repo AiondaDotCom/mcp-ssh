@@ -12,6 +12,13 @@ import { join } from 'node:path';
 export const isWindows = process.platform === 'win32';
 
 /**
+ * macOS and Windows compare filenames case-insensitively, and realpath does not
+ * canonicalise case there — so a path comparison that must not be bypassable by
+ * spelling has to fold case on those platforms.
+ */
+export const isCaseSensitiveFs = process.platform === 'linux';
+
+/**
  * Windows + restricted MCP hosts: Claude Desktop launches the extension with a
  * stripped, allow-listed environment that omits %ProgramData% and
  * %ALLUSERSPROFILE%. Win32-OpenSSH resolves %ProgramData% at startup to find its

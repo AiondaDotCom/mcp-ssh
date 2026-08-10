@@ -25,6 +25,9 @@ interface ConfigLine {
 
 const LINE_TYPE_COMMENT = 2;
 
+/** Upper bound on files pulled in through Include, as a guard against pathological nesting. */
+const MAX_INCLUDE_FILES = 64;
+
 export class SSHConfigParser {
   configPath: string;
   knownHostsPath: string;
@@ -48,7 +51,17 @@ export class SSHConfigParser {
     }
   }
 
-  async processIncludeDirectives(configPath: string): Promise<HostInfo[]> {
+  /**
+   * `visited` breaks Include cycles: a config that includes itself, directly or
+   * through another file, would otherwise recurse until the stack blows. The
+   * depth cap is a second belt for pathological but acyclic nesting.
+   */
+  async processIncludeDirectives(
+    configPath: string,
+    visited = new Set<string>(),
+  ): Promise<HostInfo[]> {
+    if (visited.has(configPath) || visited.size >= MAX_INCLUDE_FILES) return [];
+    visited.add(configPath);
     try {
       const content = await readFile(configPath, 'utf-8');
       const config = SSHConfig.parse(content) as unknown as ConfigLine[];
@@ -59,7 +72,7 @@ export class SSHConfigParser {
           const includePaths = this.expandIncludePath(configValueToString(section.value), configPath);
 
           for (const includePath of includePaths) {
-            const includeHosts = await this.processIncludeDirectives(includePath);
+            const includeHosts = await this.processIncludeDirectives(includePath, visited);
             hosts.push(...includeHosts);
           }
         }

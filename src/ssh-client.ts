@@ -12,14 +12,14 @@
 import { spawn as nodeSpawn, execFile } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { promisify } from 'node:util';
-import { unlinkSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync } from 'node:fs';
 import { writeFile, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 
 import { SSHConfigParser } from './ssh-config-parser.js';
 import { hostMatchesAlias } from './config-values.js';
-import { debugLog, isWindows, SSH_BIN, SCP_BIN } from './platform.js';
+import { debugLog, isWindows, isCaseSensitiveFs, SSH_BIN, SCP_BIN } from './platform.js';
 import type {
   BatchResult,
   CommandResult,
@@ -116,6 +116,57 @@ export class SSHClient {
     );
   }
 
+  /**
+   * Reject a download destination inside the user's SSH directory.
+   *
+   * `~/.ssh/config` is the trust base of this whole product: it *is* the host
+   * allowlist `_assertKnownHostAlias()` checks against, and ssh executes any
+   * `ProxyCommand` it finds there **locally, through /bin/sh**. So a write into
+   * that directory turns the by-design remote RCE of `runRemoteCommand` into
+   * local RCE:
+   *
+   *   1. runRemoteCommand(anyConfiguredHost, 'cat > /tmp/x …ProxyCommand…')
+   *   2. downloadFile(thatHost, '/tmp/x', '~/.ssh/config')
+   *   3. runRemoteCommand('evil', 'true')   → ProxyCommand runs on this machine
+   *
+   * Step 3 is not theoretical — it was verified against the real ssh binary.
+   * That contradicts the "local RCE must stay impossible" invariant, so the
+   * write is refused even though path arguments are otherwise unsandboxed.
+   *
+   * This guards **integrity, not confidentiality**: `uploadFile` merely *reads*
+   * localPath and is deliberately not covered. Blocking reads would be theatre
+   * (every other secret on the disk stays readable by design) and would break
+   * backing up one's own config to a configured host.
+   */
+  _assertNotSshDirectory(localPath: string): void {
+    const sshDir = join(homedir(), '.ssh');
+    // resolve() makes it absolute and collapses '..'; realpath resolves symlinks
+    // on whatever part of the path already exists, so a link into ~/.ssh cannot
+    // launder the destination.
+    // Expand a leading '~' for the check only. We spawn without a shell, so scp
+    // would take it literally — but a caller writing '~/.ssh/config' clearly
+    // means the SSH directory, and treating it as a plain directory name would
+    // let the guard be sidestepped by spelling.
+    const expanded = /^~(?=$|[\\/])/.test(localPath)
+      ? join(homedir(), localPath.slice(1))
+      : localPath;
+    const target = realpathish(resolve(expanded));
+    const dir = realpathish(sshDir);
+
+    // macOS and Windows are case-insensitive and realpath does not canonicalise
+    // case there, so compare case-insensitively on those platforms.
+    const norm = (p: string): string => (isCaseSensitiveFs ? p : p.toLowerCase());
+    const t = norm(target);
+    const d = norm(dir);
+
+    if (t === d || t.startsWith(d + sep)) {
+      throw new Error(
+        `Invalid localPath: refusing to write inside ${sshDir}. That directory defines ` +
+        `which hosts may be reached and can make ssh execute commands locally.`
+      );
+    }
+  }
+
   /** The LLM may only reach hosts the user has actually configured. */
   async _assertKnownHostAlias(hostAlias: string): Promise<void> {
     const cleanAlias = stripUserPrefix(hostAlias);
@@ -144,20 +195,26 @@ export class SSHClient {
   async getAskpassScript(): Promise<string> {
     if (this._askpassScript) return this._askpassScript;
 
+    // A predictable path in a shared temp dir is a hijack target: ssh executes
+    // this helper with MCP_SSH_PASS in its environment, so whoever controls the
+    // file controls what runs and can capture the password. mkdtemp gives an
+    // unpredictable, 0700 directory; `flag: 'wx'` makes the create exclusive so
+    // an existing file or symlink is never followed.
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-ssh-'));
     let scriptPath: string;
     if (isWindows) {
-      scriptPath = join(tmpdir(), `mcp-ssh-askpass-${process.pid}.cmd`);
-      await writeFile(scriptPath, '@echo off\r\necho %MCP_SSH_PASS%\r\n');
+      scriptPath = join(dir, `mcp-ssh-askpass-${process.pid}.cmd`);
+      await writeFile(scriptPath, '@echo off\r\necho %MCP_SSH_PASS%\r\n', { flag: 'wx' });
     } else {
-      scriptPath = join(tmpdir(), `mcp-ssh-askpass-${process.pid}.sh`);
-      await writeFile(scriptPath, '#!/bin/sh\necho "$MCP_SSH_PASS"\n');
+      scriptPath = join(dir, `mcp-ssh-askpass-${process.pid}.sh`);
+      await writeFile(scriptPath, '#!/bin/sh\necho "$MCP_SSH_PASS"\n', { flag: 'wx', mode: 0o700 });
       await chmod(scriptPath, 0o700);
     }
     this._askpassScript = scriptPath;
 
     const cleanup = (): void => {
       try {
-        unlinkSync(scriptPath);
+        rmSync(dir, { recursive: true, force: true });
       } catch {
         // Already gone, or never written — nothing to clean up.
       }
@@ -315,7 +372,7 @@ export class SSHClient {
     return this._scp(
       hostAlias,
       localPath,
-      [localPath, `${hostAlias}:${remotePath}`],
+      [localPath, `${scpHost(hostAlias)}:${remotePath}`],
       `Executing: scp ${localPath} ${hostAlias}:${remotePath}\n`,
       `Error uploading file to ${hostAlias}`,
     );
@@ -325,9 +382,11 @@ export class SSHClient {
     return this._scp(
       hostAlias,
       localPath,
-      [`${hostAlias}:${remotePath}`, localPath],
+      [`${scpHost(hostAlias)}:${remotePath}`, localPath],
       `Executing: scp ${hostAlias}:${remotePath} ${localPath}\n`,
       `Error downloading file from ${hostAlias}`,
+      // localPath is the destination here: guard the SSH directory against writes.
+      true,
     );
   }
 
@@ -338,12 +397,14 @@ export class SSHClient {
     paths: [string, string],
     logLine: string,
     errorPrefix: string,
+    localPathIsDestination = false,
   ): Promise<boolean> {
     try {
       this._assertSafeHostAlias(hostAlias);
       // Validate before the known-host lookup: a remote spec in localPath must
       // be rejected outright, not merely because the alias happens to be unknown.
       this._assertLocalPath(localPath);
+      if (localPathIsDestination) this._assertNotSshDirectory(localPath);
       await this._assertKnownHostAlias(hostAlias);
       debugLog(logLine);
 
@@ -382,6 +443,46 @@ export class SSHClient {
       };
     }
   }
+}
+
+/**
+ * Resolve a path as far as it exists, so a symlink cannot hide the real target.
+ * The final component of a download destination usually does not exist yet, so
+ * walk up to the nearest existing ancestor and resolve that.
+ */
+function realpathish(p: string): string {
+  const abs = resolve(p);
+  const segments = abs.split(sep);
+  // Longest prefix first. i stops at 2 because the one-segment prefix is the
+  // filesystem root, which always resolves and would make the loop pointless.
+  for (let i = segments.length; i > 1; i--) {
+    try {
+      return join(realpathSync(segments.slice(0, i).join(sep)), ...segments.slice(i));
+    } catch {
+      // This prefix does not exist yet — try a shorter one.
+    }
+  }
+  return abs;   // not even the top-level entry exists
+}
+
+/**
+ * Render the host part of an scp remote spec.
+ *
+ * scp splits `host:path` on the FIRST colon, while ssh never splits its
+ * destination argument. So an alias the allowlist approved — `a:b`, or a bare
+ * IPv6 address — would send scp to a *different* host than the one that was
+ * validated. Verified against the real binary: `2001:db8::1:/p` connects to
+ * 0.0.7.209, and `a:b:/p` connects to `a`.
+ *
+ * Brackets pin the host explicitly. They are valid for ordinary names too, so
+ * this needs no special case — but `user@` belongs OUTSIDE the bracket:
+ * scp reads `[user@host]:/p` as host `host]`.
+ */
+function scpHost(hostAlias: string): string {
+  const at = hostAlias.lastIndexOf('@');
+  return at === -1
+    ? `[${hostAlias}]`
+    : `${hostAlias.slice(0, at + 1)}[${hostAlias.slice(at + 1)}]`;
 }
 
 /** "test@ssh-test" -> "ssh-test" */

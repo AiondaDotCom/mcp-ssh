@@ -601,3 +601,38 @@ describe('parser edge shapes', () => {
     expect(hosts).toEqual([]);
   });
 });
+
+describe('Include recursion is bounded', () => {
+  let parser: SSHConfigParser;
+
+  beforeEach(() => {
+    parser = new SSHConfigParser();
+    vi.clearAllMocks();
+  });
+
+  it('should terminate on a config that includes itself', async () => {
+    // Without a cycle guard this recurses until the stack blows. The config is
+    // the user's own file, so this is robustness rather than an LLM-reachable
+    // bug — but it becomes reachable if anything can write that file.
+    readFile.mockResolvedValue('Include /tmp/self.conf\n\nHost real\n    HostName 1.2.3.4\n');
+    parser.expandIncludePath = vi.fn(() => ['/tmp/self.conf']);
+
+    const hosts = await parser.processIncludeDirectives('/tmp/self.conf');
+
+    expect(Array.isArray(hosts)).toBe(true);
+    expect(hosts.some(h => h.alias === 'real')).toBe(true);
+  }, 10000);
+
+  it('should terminate on a two-file include cycle', async () => {
+    readFile.mockImplementation(async (p: unknown) =>
+      String(p).endsWith('a.conf')
+        ? 'Include /tmp/b.conf\nHost a\n    HostName 1.1.1.1\n'
+        : 'Include /tmp/a.conf\nHost b\n    HostName 2.2.2.2\n'
+    );
+    parser.expandIncludePath = vi.fn((inc: string) => [inc]);
+
+    const hosts = await parser.processIncludeDirectives('/tmp/a.conf');
+
+    expect(Array.isArray(hosts)).toBe(true);
+  }, 10000);
+});
