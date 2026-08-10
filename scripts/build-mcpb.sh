@@ -1,13 +1,12 @@
 #!/bin/bash
 
-# Build script for creating the installable bundle for Claude Desktop.
+# Build script for creating the installable MCP Bundle for Claude Desktop.
 #
-# The format was renamed: Anthropic's ".dxt" (Desktop Extension) is now ".mcpb"
-# (MCP Bundle), and @anthropic-ai/dxt is deprecated in favour of
-# @anthropic-ai/mcpb. The manifest format is unchanged and validates against the
-# new tool as-is. We emit BOTH files from the same bundle: .mcpb for current
-# Claude Desktop builds, .dxt as a byte-identical copy for older ones that only
-# recognise the previous extension.
+# Anthropic renamed the format: the ".dxt" Desktop Extension is now the ".mcpb"
+# MCP Bundle, @anthropic-ai/dxt is deprecated in favour of @anthropic-ai/mcpb,
+# and the manifest carries `manifest_version` rather than the deprecated
+# `dxt_version`. v1.3.9 shipped both extensions during the transition; from here
+# on only .mcpb is produced.
 
 set -e
 
@@ -17,7 +16,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}Building MCP SSH bundle${NC}"
+echo -e "${GREEN}Building MCP SSH bundle (.mcpb)${NC}"
 
 if ! command -v npx &> /dev/null; then
     echo -e "${RED}Error: npm/npx not found. Please install Node.js${NC}"
@@ -49,7 +48,6 @@ if [ "$PKG_VERSION" != "$MANIFEST_VERSION" ]; then
 fi
 
 MCPB_FILE="mcp-ssh-${PKG_VERSION}.mcpb"
-DXT_FILE="mcp-ssh-${PKG_VERSION}.dxt"
 
 echo -e "${YELLOW}Validating manifest...${NC}"
 npx mcpb validate manifest.json
@@ -75,15 +73,10 @@ mkdir -p "$STAGE/doc" && cp doc/Claude.png "$STAGE/doc/"
 echo -e "${YELLOW}Packing bundle...${NC}"
 npx mcpb pack "$STAGE" "$BUILD_DIR/$MCPB_FILE"
 
-# Same archive under the legacy extension, for Claude Desktop builds predating
-# the rename.
-cp "$BUILD_DIR/$MCPB_FILE" "$BUILD_DIR/$DXT_FILE"
-
 echo -e "${GREEN}✓ Bundle created: $BUILD_DIR/$MCPB_FILE${NC}"
-echo -e "${GREEN}✓ Legacy copy:    $BUILD_DIR/$DXT_FILE${NC}"
 echo -e "${GREEN}✓ Size: $(ls -lh "$BUILD_DIR/$MCPB_FILE" | awk '{print $5}')${NC}"
 
 echo -e "\n${YELLOW}Next steps:${NC}"
 echo "1. Test the bundle locally"
-echo "2. Attach both files to the GitHub release:"
-echo "   gh release upload v${PKG_VERSION} $BUILD_DIR/$MCPB_FILE $BUILD_DIR/$DXT_FILE"
+echo "2. Attach it to the GitHub release:"
+echo "   gh release upload v${PKG_VERSION} $BUILD_DIR/$MCPB_FILE"

@@ -14,7 +14,6 @@
     "start": "node bin/mcp-ssh.js",
     "dev": "node bin/mcp-ssh.js",
     "build": "tsc -p tsconfig.build.json",
-    "build:dxt": "./scripts/build-dxt.sh",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build && npm test",
@@ -23,7 +22,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "prepare": "npm run build",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "build:mcpb": "./scripts/build-mcpb.sh"
   },
   "keywords": [
     "mcp",

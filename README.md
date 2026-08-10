@@ -10,12 +10,17 @@ This MCP server provides SSH operations through a clean, standardized interface 
 
 ## Quick Start
 
-### Desktop Extension Installation (Recommended)
+### MCP Bundle Installation (Recommended)
 
-The easiest way to install MCP SSH Agent is through the Desktop Extension (.dxt) format:
+The easiest way to install MCP SSH Agent is as an MCP Bundle:
 
-1. Download the latest `mcp-ssh-*.dxt` file from the [GitHub releases page](https://github.com/aiondadotcom/mcp-ssh/releases)
-2. Double-click the `.dxt` file to install it in Claude Desktop
+1. Download the latest `mcp-ssh-*.mcpb` file from the [GitHub releases page](https://github.com/aiondadotcom/mcp-ssh/releases)
+2. Double-click the `.mcpb` file to install it in Claude Desktop
+
+> The bundle format was previously called a Desktop Extension and used the `.dxt`
+> extension. v1.3.9 shipped both files during the transition; later releases carry
+> `.mcpb` only. If your Claude Desktop is old enough to reject a `.mcpb` file,
+> update it or use one of the installation methods below.
 3. The SSH tools will be automatically available in your conversations with Claude
 
 ### Alternative Installation Methods
@@ -622,40 +627,34 @@ MCP SSH Agent gives an LLM the ability to drive `ssh` and `scp` on your behalf. 
 - **Monitor SSH logs** regularly
 - **Use SSH key forwarding carefully** (disable when not needed)
 
-## Building Desktop Extensions
+## Building the MCP Bundle
 
-For developers who want to build DXT packages locally:
+For developers who want to build the bundle locally:
 
 ### Prerequisites
 
 - Node.js 20 or higher
 - npm
 
-### Building DXT Package
+### Building
 
 ```bash
-# Install dependencies
 npm install
-
-# Build the DXT package
-npm run build:dxt
+npm run build:mcpb
 ```
 
-This creates a `.dxt` file in the `build/` directory that can be installed in Claude Desktop.
+This writes `build/mcp-ssh-<version>.mcpb`, installable in Claude Desktop.
 
-### Publishing DXT Releases
+The bundle is packed from a staging copy containing only production dependencies,
+so it does not carry the test and build toolchain. The build refuses to run if
+`manifest.json` and `package.json` disagree on the version.
 
-To publish a new DXT release:
+### Publishing a release
 
 ```bash
-# Build the DXT package
-npm run build:dxt
-
-# Create a GitHub release with the DXT file
-gh release create v1.0.3 build/mcp-ssh-1.0.3.dxt --title "Release v1.0.3" --notes "MCP SSH Agent v1.0.3"
+npm run build:mcpb
+gh release upload v1.3.9 build/mcp-ssh-1.3.9.mcpb
 ```
-
-The DXT file will be available as a release asset for users to download and install.
 
 ## Contributing
 
@@ -712,7 +711,7 @@ mcp-ssh/
 ├── tsconfig.test.json         # Relaxed options for test files
 ├── eslint.config.mjs          # typescript-eslint, type-aware rules
 ├── vitest.config.mjs          # Test and coverage configuration
-├── manifest.json              # DXT package manifest
+├── manifest.json              # MCP Bundle manifest
 ├── package.json               # Dependencies and scripts
 ├── README.md                  # Documentation
 ├── LICENSE                    # MIT License
@@ -722,7 +721,7 @@ mcp-ssh/
 ├── start.sh                   # Development startup script
 ├── start-silent.sh            # Silent startup script
 ├── scripts/
-│   └── build-dxt.sh           # DXT package build script
+│   └── build-mcpb.sh          # MCP Bundle build script
 └── doc/                       # Documentation assets
     ├── example.png            # Usage example screenshot
     └── Claude.png             # Claude Desktop integration example

@@ -115,6 +115,7 @@ Thumbs.db
 dist/
 build/
 
-# DXT build artifacts
+# Bundle build artifacts
+*.mcpb
 *.dxt
 releases/

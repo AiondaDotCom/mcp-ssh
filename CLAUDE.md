@@ -34,14 +34,14 @@ directly and needs no build).
 - `npm publish` - Publish to npm (see PUBLISHING.md for details)
 - `npm pack` - Create tarball for testing
 
-### DXT Package Building
-- `npm run build:dxt` - Build Desktop Extension (.dxt) package
-- `./scripts/build-dxt.sh` - Direct build script execution
+### MCP Bundle Building
+- `npm run build:mcpb` - Build the installable MCP Bundle (`.mcpb`) into `build/`
+- `./scripts/build-mcpb.sh` - Direct build script execution
 
 ## Architecture
 
 TypeScript under `src/`, compiled to `dist/` by `tsc`. `dist/` is generated and not in git;
-`bin/mcp-ssh.js` and the DXT package both load `dist/server.js`.
+`bin/mcp-ssh.js` and the MCP Bundle both load `dist/server.js`.
 
 ### Modules
 - `src/server.ts` - Entry point. Wires the MCP server, registers handlers, exports `main()`
@@ -192,13 +192,15 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 - `ssh-config` - SSH configuration file parsing
 - Node.js built-ins: `child_process`, `fs/promises`, `os`, `path`
 
-## Desktop Extension Support
+## MCP Bundle Support
 
-The project supports Desktop Extensions (.dxt) for easy installation in Claude Desktop:
+The project ships an installable bundle for Claude Desktop:
 
-- `manifest.json` - DXT package manifest with server configuration
-- `scripts/build-dxt.sh` - Build script that creates .dxt packages in `build/` directory
-- `.dxt` files are ZIP archives containing the manifest and server files
+- `manifest.json` - Bundle manifest. Uses `manifest_version` (the older `dxt_version` is deprecated in the schema), and its `version` must match `package.json` — the build fails on drift
+- `scripts/build-mcpb.sh` - Build script that writes `build/mcp-ssh-<version>.mcpb`
+- `.mcpb` files are ZIP archives containing the manifest, `dist/`, `bin/` and production `node_modules`
+- **Pack from the staging copy, never the working tree.** Packing the tree directly bundles every devDependency (~290 packages, 81 MB unpacked). An extension that reaches SSH credentials should not carry a test runner
+- The format was renamed from Desktop Extension (`.dxt`); `@anthropic-ai/dxt` is deprecated in favour of `@anthropic-ai/mcpb`
 - Built packages are excluded from git via `.gitignore` but can be uploaded to GitHub releases
 
 ## Threat Model
@@ -217,4 +219,4 @@ The LLM driving this MCP server is **not trusted** — its tool arguments can be
 - Production code is TypeScript in `src/`, compiled to `dist/`. Never edit `dist/` — it is regenerated on every build.
 - SSH operations require properly configured SSH keys or `@password` annotations
 - The agent runs over STDIO as an MCP server, not as a standalone application
-- DXT packages provide one-click installation alternative to manual JSON configuration
+- The MCP Bundle provides one-click installation as an alternative to manual JSON configuration
