@@ -32,9 +32,9 @@ function isToken(value: unknown): value is ConfigToken {
 export function configValueTokens(value: ConfigValue): string[] {
   if (value == null) return [];
   if (Array.isArray(value)) {
-    return value.map(v => (isToken(v) ? v.val : String(v))).filter(v => v !== '');
+    return value.map(v => (isToken(v) ? v.val : v)).filter(v => v !== '');
   }
-  return [String(value)];
+  return [value];
 }
 
 /** Normalize either shape into a single readable string. */

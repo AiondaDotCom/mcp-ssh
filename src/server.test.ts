@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import type { Mock, MockInstance } from 'vitest';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
@@ -10,7 +11,7 @@ const sshConfigLib = require('ssh-config');
 
 // Mock fs/promises (used via ESM import in server.mjs)
 vi.mock('node:fs', async () => {
-  const actual = await vi.importActual('node:fs');
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return { ...actual, existsSync: vi.fn(actual.existsSync) };
 });
 
@@ -26,8 +27,29 @@ vi.mock('node:fs/promises', async () => {
   };
 });
 
-import { readFile, stat, writeFile, chmod } from 'node:fs/promises';
+import * as fsPromises from 'node:fs/promises';
+
+const readFile = fsPromises.readFile as unknown as Mock;
+const stat = fsPromises.stat as unknown as Mock;
+const writeFile = fsPromises.writeFile as unknown as Mock;
+const chmod = fsPromises.chmod as unknown as Mock;
 import { SSHConfigParser, SSHClient, main, SSH_BIN, SCP_BIN } from './server.js';
+
+/** A stand-in for ChildProcess: an emitter with the streams bolted on. */
+interface MockChild extends EventEmitter {
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  kill: Mock;
+}
+
+/** The fs/promises functions this suite mocks, as vitest sees them. */
+interface MockedFs {
+  readFile: Mock;
+  stat: Mock;
+  writeFile: Mock;
+  chmod: Mock;
+  unlink: Mock;
+}
 
 // Load a fresh copy of server.mjs with process.platform (and optionally parts of
 // the environment) faked, so both the POSIX and the Windows branches can be
@@ -45,7 +67,22 @@ import { SSHConfigParser, SSHClient, main, SSH_BIN, SCP_BIN } from './server.js'
 // nothing asserted them.
 const ENV_MUTATED_AT_IMPORT = ['ProgramData', 'ALLUSERSPROFILE'];
 
-async function loadServerAs(platform, envOverrides = {}) {
+/** What a re-imported copy of the server module graph exposes to a test. */
+interface LoadedServer {
+  SSHClient: typeof SSHClient;
+  SSHConfigParser: typeof SSHConfigParser;
+  main: typeof main;
+  debugLog: (message: string) => void;
+  SSH_BIN: string;
+  SCP_BIN: string;
+  fs: MockedFs;
+  envAfterImport: Record<string, string | undefined>;
+}
+
+async function loadServerAs(
+  platform: string,
+  envOverrides: Record<string, string | undefined> = {},
+): Promise<LoadedServer> {
   const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   const realEnv = {};
 
@@ -71,7 +108,7 @@ async function loadServerAs(platform, envOverrides = {}) {
     const envAfterImport = Object.fromEntries(
       ENV_MUTATED_AT_IMPORT.map(key => [key, process.env[key]])
     );
-    return { ...server, fs, envAfterImport };
+    return { ...server, fs, envAfterImport } as unknown as LoadedServer;
   } finally {
     Object.defineProperty(process, 'platform', realPlatform);
     for (const key of new Set([...ENV_MUTATED_AT_IMPORT, ...Object.keys(envOverrides)])) {
@@ -82,9 +119,18 @@ async function loadServerAs(platform, envOverrides = {}) {
 }
 
 // Helper: create a fake spawn that returns a mock child process
-function createMockSpawn({ stdout = '', stderr = '', code = 0, error = null } = {}) {
+type SpawnMock = Mock;
+type ExecFileMock = Mock;
+
+/** SSHClient with its spawn/execFile injection points seen as plain mocks. */
+type TestClient = Omit<SSHClient, '_spawn' | '_execFileAsync'> & {
+  _spawn: Mock;
+  _execFileAsync: Mock;
+};
+
+function createMockSpawn({ stdout = '', stderr = '', code = 0, error = null } = {}): SpawnMock {
   return vi.fn(() => {
-    const child = new EventEmitter();
+    const child = new EventEmitter() as MockChild;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.kill = vi.fn(() => {
@@ -102,15 +148,15 @@ function createMockSpawn({ stdout = '', stderr = '', code = 0, error = null } = 
     }, 5);
 
     return child;
-  });
+  }) as unknown as SpawnMock;
 }
 
 // Helper: create a fake execFileAsync
-function createMockExecFileAsync({ error = null } = {}) {
+function createMockExecFileAsync({ error = null } = {}): ExecFileMock {
   return vi.fn(async () => {
     if (error) throw error;
     return { stdout: '', stderr: '' };
-  });
+  }) as unknown as ExecFileMock;
 }
 
 const SAMPLE_SSH_CONFIG = `
@@ -147,7 +193,7 @@ const SAMPLE_KNOWN_HOSTS = `157.90.89.149 ssh-ed25519 AAAAC3Nz...
 // =============================================================================
 
 describe('SSHConfigParser', () => {
-  let parser;
+  let parser: SSHConfigParser;
 
   beforeEach(() => {
     parser = new SSHConfigParser();
@@ -292,7 +338,7 @@ Host test
     ProxyJump bastion
 `);
       const hosts = parser.extractHostsFromConfig(config, '/test');
-      expect(hosts.proxyjump || hosts[0].proxyjump).toBe('bastion');
+      expect(hosts[0].proxyjump).toBe('bastion');
     });
 
     it('should track configs with passwords', () => {
@@ -370,8 +416,8 @@ Host test
   // a deliberate no-op there. Pin the platform instead of inheriting the host's,
   // otherwise every expectation below is wrong on one OS or the other.
   describe('checkFilePermissions (POSIX)', () => {
-    let posixParser;
-    let posixStat;
+    let posixParser: SSHConfigParser;
+    let posixStat: Mock;
 
     beforeEach(async () => {
       const posix = await loadServerAs('linux');
@@ -400,7 +446,7 @@ Host test
     });
 
     it('should ignore ENOENT errors', async () => {
-      const err = new Error('not found');
+      const err: NodeJS.ErrnoException = new Error('not found');
       err.code = 'ENOENT';
       posixStat.mockRejectedValue(err);
       await expect(posixParser.checkFilePermissions('/test')).resolves.not.toThrow();
@@ -574,10 +620,10 @@ Host main
 // =============================================================================
 
 describe('SSHClient', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
   });
 
@@ -616,15 +662,15 @@ describe('SSHClient', () => {
   // batch file on Windows (no chmod — NTFS ACLs, not mode bits). Both variants
   // are asserted explicitly so the suite is meaningful on either host OS.
   describe('getAskpassScript (POSIX)', () => {
-    let posixClient;
-    let posixFs;
+    let posixClient: TestClient;
+    let posixFs: MockedFs;
 
     beforeEach(async () => {
       const posix = await loadServerAs('linux');
-      posixClient = new posix.SSHClient();
+      posixClient = new posix.SSHClient() as unknown as TestClient;
       posixFs = posix.fs;
-      posixFs.writeFile.mockResolvedValue();
-      posixFs.chmod.mockResolvedValue();
+      posixFs.writeFile.mockResolvedValue(undefined);
+      posixFs.chmod.mockResolvedValue(undefined);
     });
 
     it('should create askpass script and cache it', async () => {
@@ -652,15 +698,15 @@ describe('SSHClient', () => {
   });
 
   describe('getAskpassScript (Windows)', () => {
-    let winClient;
-    let winFs;
+    let winClient: TestClient;
+    let winFs: MockedFs;
 
     beforeEach(async () => {
       const win = await loadServerAs('win32');
-      winClient = new win.SSHClient();
+      winClient = new win.SSHClient() as unknown as TestClient;
       winFs = win.fs;
-      winFs.writeFile.mockResolvedValue();
-      winFs.chmod.mockResolvedValue();
+      winFs.writeFile.mockResolvedValue(undefined);
+      winFs.chmod.mockResolvedValue(undefined);
     });
 
     it('should write a .cmd batch file with CRLF line endings', async () => {
@@ -697,8 +743,8 @@ describe('SSHClient', () => {
     it('should return env with SSH_ASKPASS for host with password', async () => {
       readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
       stat.mockResolvedValue({ mode: 0o100600 });
-      writeFile.mockResolvedValue();
-      chmod.mockResolvedValue();
+      writeFile.mockResolvedValue(undefined);
+      chmod.mockResolvedValue(undefined);
 
       const env = await client.buildSpawnEnv('mail');
       expect(env.MCP_SSH_PASS).toBe('killer99');
@@ -710,7 +756,7 @@ describe('SSHClient', () => {
     // POSIX-pinned: relies on the permission check, which is a no-op on Windows.
     it('should throw if config has insecure permissions', async () => {
       const posix = await loadServerAs('linux');
-      const posixClient = new posix.SSHClient();
+      const posixClient = new posix.SSHClient() as unknown as TestClient;
       posix.fs.readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
       posix.fs.stat.mockResolvedValue({ mode: 0o100644 });
 
@@ -757,7 +803,7 @@ describe('SSHClient', () => {
 
     it('should handle timeout', async () => {
       client._spawn = vi.fn(() => {
-        const child = new EventEmitter();
+        const child = new EventEmitter() as MockChild;
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = vi.fn(() => {
@@ -776,11 +822,11 @@ describe('SSHClient', () => {
     // sides so neither expectation depends on the host OS.
     it('should set detached and env when password is available (POSIX)', async () => {
       const posix = await loadServerAs('linux');
-      const posixClient = new posix.SSHClient();
+      const posixClient = new posix.SSHClient() as unknown as TestClient;
       posix.fs.readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
       posix.fs.stat.mockResolvedValue({ mode: 0o100600 });
-      posix.fs.writeFile.mockResolvedValue();
-      posix.fs.chmod.mockResolvedValue();
+      posix.fs.writeFile.mockResolvedValue(undefined);
+      posix.fs.chmod.mockResolvedValue(undefined);
       posixClient._spawn = createMockSpawn({ stdout: 'ok', code: 0 });
 
       await posixClient.runRemoteCommand('mail', 'ls');
@@ -800,9 +846,9 @@ describe('SSHClient', () => {
 
     it('should set env but not detached when password is available (Windows)', async () => {
       const win = await loadServerAs('win32');
-      const winClient = new win.SSHClient();
+      const winClient = new win.SSHClient() as unknown as TestClient;
       win.fs.readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
-      win.fs.writeFile.mockResolvedValue();
+      win.fs.writeFile.mockResolvedValue(undefined);
       winClient._spawn = createMockSpawn({ stdout: 'ok', code: 0 });
 
       await winClient.runRemoteCommand('mail', 'ls');
@@ -831,7 +877,7 @@ describe('SSHClient', () => {
 
     it('should truncate stdout exceeding 10MB', async () => {
       client._spawn = vi.fn(() => {
-        const child = new EventEmitter();
+        const child = new EventEmitter() as MockChild;
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = vi.fn();
@@ -911,7 +957,7 @@ describe('SSHClient', () => {
 
     it('should truncate stderr exceeding 10MB', async () => {
       client._spawn = vi.fn(() => {
-        const child = new EventEmitter();
+        const child = new EventEmitter() as MockChild;
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = vi.fn();
@@ -1014,8 +1060,8 @@ describe('SSHClient', () => {
     it('should pass password env when available', async () => {
       readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
       stat.mockResolvedValue({ mode: 0o100600 });
-      writeFile.mockResolvedValue();
-      chmod.mockResolvedValue();
+      writeFile.mockResolvedValue(undefined);
+      chmod.mockResolvedValue(undefined);
       client._execFileAsync = createMockExecFileAsync();
 
       await client.uploadFile('mail', '/local/file', '/remote/file');
@@ -1097,7 +1143,7 @@ describe('SSHClient', () => {
       let callCount = 0;
       client._spawn = vi.fn(() => {
         callCount++;
-        const child = new EventEmitter();
+        const child = new EventEmitter() as MockChild;
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = vi.fn();
@@ -1120,7 +1166,7 @@ describe('SSHClient', () => {
       let callCount = 0;
       client._spawn = vi.fn(() => {
         callCount++;
-        const child = new EventEmitter();
+        const child = new EventEmitter() as MockChild;
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = vi.fn();
@@ -1207,9 +1253,8 @@ describe('SSHClient', () => {
 // =============================================================================
 
 describe('MCP Server Handlers', () => {
-  let server;
-  let handlers;
-  let clientSpies;
+  let handlers: Record<string, (...args: any[]) => any>;
+  let clientSpies: MockInstance[];
 
   afterEach(() => {
     for (const spy of clientSpies) spy.mockRestore();
@@ -1242,7 +1287,7 @@ describe('MCP Server Handlers', () => {
     const origSetRequestHandler = Server.prototype.setRequestHandler;
     const origConnect = Server.prototype.connect;
 
-    Server.prototype.setRequestHandler = function(schema, handler) {
+    Server.prototype.setRequestHandler = function(schema: unknown, handler: (...args: any[]) => any) {
       // Store by schema name
       if (schema === sdkTypes.ListToolsRequestSchema) {
         handlers.listTools = handler;
@@ -1250,7 +1295,7 @@ describe('MCP Server Handlers', () => {
         handlers.callTool = handler;
       }
     };
-    Server.prototype.connect = vi.fn().mockResolvedValue();
+    Server.prototype.connect = vi.fn().mockResolvedValue(undefined);
 
     readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
     stat.mockResolvedValue({ mode: 0o100600 });
@@ -1450,7 +1495,7 @@ describe('main() error handling', () => {
 
     Server.prototype.connect = vi.fn().mockRejectedValue(new Error('transport failed'));
 
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
     await main();
 
@@ -1472,7 +1517,7 @@ describe('main() error handling', () => {
 // =============================================================================
 
 describe('resolveExecutable (Windows binary resolution)', () => {
-  let binDir;
+  let binDir: string;
 
   beforeAll(() => {
     binDir = mkdtempSync(join(tmpdir(), 'mcp-ssh-bin-'));
@@ -1546,7 +1591,7 @@ describe('resolveExecutable (Windows binary resolution)', () => {
 // =============================================================================
 
 describe('config value normalization', () => {
-  let parser;
+  let parser: SSHConfigParser;
 
   beforeEach(() => {
     parser = new SSHConfigParser();
@@ -1611,8 +1656,8 @@ Host real
 // =============================================================================
 
 describe('expandIncludePath (existing paths)', () => {
-  let parser;
-  let dir;
+  let parser: SSHConfigParser;
+  let dir: string;
 
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'mcp-ssh-inc-'));
@@ -1648,10 +1693,10 @@ describe('expandIncludePath (existing paths)', () => {
 // =============================================================================
 
 describe('_assertSafeHostAlias argument validation', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
   });
 
@@ -1676,10 +1721,10 @@ describe('_assertSafeHostAlias argument validation', () => {
 });
 
 describe('hostMatchesAlias against known_hosts entries', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
   });
 
@@ -1727,15 +1772,15 @@ describe('silent mode', () => {
 });
 
 describe('askpass script cleanup handlers', () => {
-  let client;
-  let exitSpy;
+  let client: TestClient;
+  let exitSpy: MockInstance;
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    writeFile.mockResolvedValue();
-    chmod.mockResolvedValue();
-    client = new SSHClient();
-    exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+    writeFile.mockResolvedValue(undefined);
+    chmod.mockResolvedValue(undefined);
+    client = new SSHClient() as unknown as TestClient;
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
   });
 
   afterEach(() => {
@@ -1749,7 +1794,7 @@ describe('askpass script cleanup handlers', () => {
     await client.getAskpassScript();
     const listeners = process.listeners(signal);
     expect(listeners.length).toBeGreaterThan(before);
-    const handler = listeners[listeners.length - 1];
+    const handler = listeners[listeners.length - 1] as (...args: any[]) => void;
     return () => {
       handler();
       process.removeListener(signal, handler);
@@ -1777,15 +1822,15 @@ describe('askpass script cleanup handlers', () => {
 });
 
 describe('password env on the scp paths', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
     readFile.mockResolvedValue(SAMPLE_SSH_CONFIG);
     stat.mockResolvedValue({ mode: 0o100600 });
-    writeFile.mockResolvedValue();
-    chmod.mockResolvedValue();
+    writeFile.mockResolvedValue(undefined);
+    chmod.mockResolvedValue(undefined);
   });
 
   it('should pass password env to downloadFile', async () => {
@@ -1817,10 +1862,10 @@ describe('password env on the scp paths', () => {
 });
 
 describe('output truncation', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
     readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
   });
@@ -1829,7 +1874,7 @@ describe('output truncation', () => {
   // must be dropped silently rather than appending it again.
   function spawnEmitting(stream, chunks) {
     return vi.fn(() => {
-      const child = new EventEmitter();
+      const child = new EventEmitter() as MockChild;
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
       child.kill = vi.fn();
@@ -1968,7 +2013,7 @@ describe('Windows ProgramData normalization', () => {
       ALLUSERSPROFILE: undefined,
       SystemDrive: 'C:',
     });
-    const client = new win.SSHClient();
+    const client = new win.SSHClient() as unknown as TestClient;
     win.fs.readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
     client._spawn = createMockSpawn({ stdout: 'ok\n', code: 0 });
 
@@ -1986,7 +2031,7 @@ describe('Windows ProgramData normalization', () => {
 // =============================================================================
 
 describe('non-Error failures', () => {
-  let parser;
+  let parser: SSHConfigParser;
 
   beforeEach(() => {
     parser = new SSHConfigParser();
@@ -2004,7 +2049,7 @@ describe('non-Error failures', () => {
     const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
     const origConnect = Server.prototype.connect;
     Server.prototype.connect = vi.fn().mockRejectedValue('transport exploded');
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
     try {
       await main();
@@ -2017,7 +2062,7 @@ describe('non-Error failures', () => {
 });
 
 describe('parser edge shapes', () => {
-  let parser;
+  let parser: SSHConfigParser;
 
   beforeEach(() => {
     parser = new SSHConfigParser();
@@ -2033,10 +2078,10 @@ describe('parser edge shapes', () => {
 });
 
 describe('remote command exit codes', () => {
-  let client;
+  let client: TestClient;
 
   beforeEach(() => {
-    client = new SSHClient();
+    client = new SSHClient() as unknown as TestClient;
     vi.clearAllMocks();
     readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
   });
@@ -2044,7 +2089,7 @@ describe('remote command exit codes', () => {
   it('should report code 0 when the process closes with a null code', async () => {
     // ssh killed by a signal exits with a null code and no timeout involved.
     client._spawn = vi.fn(() => {
-      const child = new EventEmitter();
+      const child = new EventEmitter() as MockChild;
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
       child.kill = vi.fn();

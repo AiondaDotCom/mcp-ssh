@@ -145,8 +145,11 @@ export async function callTool(
       }
 
       case 'runRemoteCommand': {
+        // Falsy (absent, 0) falls back to the default; `??` would let 0 through
+        // and ask ssh for a zero-millisecond timeout.
+        const requested = a['timeout'] as number | undefined;
         const timeout = Math.min(
-          (a['timeout'] as number | undefined) || DEFAULT_COMMAND_TIMEOUT,
+          requested ? requested : DEFAULT_COMMAND_TIMEOUT,
           MAX_COMMAND_TIMEOUT,
         );
         return asText(

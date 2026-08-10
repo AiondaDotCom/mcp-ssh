@@ -20,8 +20,10 @@
     "prepublishOnly": "npm run build && npm test",
     "version": "git add -A",
     "postversion": "git push && git push --tags",
-    "typecheck": "tsc --noEmit",
-    "prepare": "npm run build"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "prepare": "npm run build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "keywords": [
     "mcp",
@@ -53,10 +55,13 @@
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.6",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.11.26",
     "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.1",
     "tmp": ">=0.2.6",
     "typescript": "^5.4.3",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   },
   "overrides": {

@@ -23,6 +23,10 @@ export async function main(): Promise<void> {
     const sshClient = new SSHClient();
 
     debugLog('Creating MCP server...\n');
+    // The SDK marks the low-level Server as deprecated in favour of McpServer.
+    // Migrating changes the registration API and is deliberately out of scope
+    // for the TypeScript port.
+    // eslint-disable-next-line @typescript-eslint/no-deprecated
     const server = new Server(
       { name: 'mcp-ssh', version: '1.0.0' },
       { capabilities: { tools: {} } },

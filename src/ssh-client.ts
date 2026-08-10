@@ -50,8 +50,8 @@ export class SSHClient {
 
   constructor() {
     this.configParser = new SSHConfigParser();
-    this._spawn = nodeSpawn as unknown as SpawnFn;
-    this._execFileAsync = execFileAsync as unknown as ExecFileAsyncFn;
+    this._spawn = nodeSpawn;
+    this._execFileAsync = execFileAsync;
   }
 
   async listKnownHosts(): Promise<HostInfo[]> {
