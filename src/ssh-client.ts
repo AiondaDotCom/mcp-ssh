@@ -80,6 +80,42 @@ export class SSHClient {
     }
   }
 
+  /**
+   * Reject a `localPath` that scp would treat as a *second remote endpoint*.
+   *
+   * scp decides "remote or local" by looking for a colon that is not preceded by
+   * a path separator: `host:/path` and `scp://user@host:port//path` are remote,
+   * `/tmp/a:b` is local. A `localPath` of `scp://attacker/…` therefore makes scp
+   * open a second SSH connection and copy the file to a host that was never in
+   * the user's config — bypassing _assertKnownHostAlias entirely, which is the
+   * product's primary trust boundary. `--` does not help: it stops option
+   * parsing, not remote-spec interpretation.
+   *
+   * Reported as GHSA-gpr2-2wqr-7rgp.
+   */
+  _assertLocalPath(localPath: unknown): asserts localPath is string {
+    if (typeof localPath !== 'string' || localPath.length === 0) {
+      throw new Error('localPath must be a non-empty string');
+    }
+
+    const colon = localPath.indexOf(':');
+    if (colon === -1) return;
+
+    // On Windows a leading drive letter is a local path, and scp there treats it
+    // as one. Everywhere else `C:\…` really would be parsed as host `C`.
+    if (isWindows && /^[A-Za-z]:[\\/]/.test(localPath)) return;
+
+    // A separator before the colon makes it a path, exactly as scp decides it.
+    // Backslash only counts as a separator on Windows.
+    const separator = localPath.search(isWindows ? /[/\\]/ : /\//);
+    if (separator !== -1 && separator < colon) return;
+
+    throw new Error(
+      'Invalid localPath: must be a local filesystem path, not an scp remote spec ' +
+      '(a colon before the first path separator makes scp copy to another host)'
+    );
+  }
+
   /** The LLM may only reach hosts the user has actually configured. */
   async _assertKnownHostAlias(hostAlias: string): Promise<void> {
     const cleanAlias = stripUserPrefix(hostAlias);
@@ -278,6 +314,7 @@ export class SSHClient {
   async uploadFile(hostAlias: string, localPath: string, remotePath: string): Promise<boolean> {
     return this._scp(
       hostAlias,
+      localPath,
       [localPath, `${hostAlias}:${remotePath}`],
       `Executing: scp ${localPath} ${hostAlias}:${remotePath}\n`,
       `Error uploading file to ${hostAlias}`,
@@ -287,6 +324,7 @@ export class SSHClient {
   async downloadFile(hostAlias: string, remotePath: string, localPath: string): Promise<boolean> {
     return this._scp(
       hostAlias,
+      localPath,
       [`${hostAlias}:${remotePath}`, localPath],
       `Executing: scp ${hostAlias}:${remotePath} ${localPath}\n`,
       `Error downloading file from ${hostAlias}`,
@@ -296,12 +334,16 @@ export class SSHClient {
   /** Shared body of uploadFile/downloadFile — they differ only in argument order. */
   private async _scp(
     hostAlias: string,
+    localPath: string,
     paths: [string, string],
     logLine: string,
     errorPrefix: string,
   ): Promise<boolean> {
     try {
       this._assertSafeHostAlias(hostAlias);
+      // Validate before the known-host lookup: a remote spec in localPath must
+      // be rejected outright, not merely because the alias happens to be unknown.
+      this._assertLocalPath(localPath);
       await this._assertKnownHostAlias(hostAlias);
       debugLog(logLine);
 
