@@ -25,13 +25,30 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # `prepare` compiles src/ -> dist/ as part of the install.
       - name: Install dependencies
         run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
 
       # Coverage thresholds are pinned at 100% in vitest.config.mjs, so this
       # also fails the build if a change adds an untested line or branch.
       - name: Run tests
         run: npx vitest run --coverage
+
+      # The published entry point loads dist/; make sure the compiled server
+      # actually starts and answers on STDIO. This chain broke in 1.3.6 and
+      # 1.3.8, so it is verified rather than assumed.
+      - name: Smoke-test the compiled server
+        shell: bash
+        run: |
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | MCP_SILENT=true node bin/mcp-ssh.js \
+            | grep -q '"serverInfo"'
 
       # The dependency tree is platform independent — auditing it once is enough.
       - name: Security audit

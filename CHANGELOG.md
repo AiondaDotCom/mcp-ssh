@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Ported to TypeScript.** The single self-contained `server.mjs` is now seven typed modules under `src/`, compiled to `dist/` by `tsc`: `server.ts` (MCP wiring and `main()`), `tools.ts` (tool schemas and dispatch), `ssh-client.ts`, `ssh-config-parser.ts`, `config-values.ts`, `platform.ts` (everything with module-load side effects) and `types.ts`. `bin/mcp-ssh.js` and the DXT package load `dist/server.js`; `dist/` is generated, not tracked in git, and built by the `prepare` script on install.
+  - `tsconfig.json` runs `strict` plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, `noPropertyAccessFromIndexSignature` and `verbatimModuleSyntax`. Test files are checked under a lighter config (`tsconfig.test.json`).
+  - Added ESLint with `typescript-eslint` type-aware rules (`strictTypeChecked` + `stylisticTypeChecked`). Relaxations are documented in place; notably `prefer-nullish-coalescing` exempts strings and numbers, because `??` is *not* equivalent to `||` for a stripped launcher environment (an empty `%ProgramData%` must fall through, see #10) or for `timeout || DEFAULT`.
+  - Removed dead devDependencies `ts-node` and `@types/ssh2` — the repo had no `.ts` files and never used `ssh2`.
+  - The test suite is split along the same module boundaries (four files plus shared `test-helpers.ts`) and grew from 148 to 152 tests, still at 100% coverage of statements, branches, functions and lines.
+  - CI now runs `typecheck`, `lint`, the suite, and a smoke test that starts the *compiled* server over STDIO — the delivery chain that broke in 1.3.6 and 1.3.8 is now verified on every push, on Linux and Windows across Node 20/22/24.
+  - No behavioural changes: every existing test passes unmodified except where a mock had to follow the module split.
+
 ### Security
 - Resolved all 17 open `npm audit` advisories (12 high, 4 moderate, 1 low) that accumulated since the 1.3.7 cleanup. `npm audit` now reports zero vulnerabilities again. `npm audit fix` could not be used — it aborts with an internal npm error (`Cannot read properties of null (reading 'edgesOut')`) on this tree's `overrides` — so the fixes are pinned explicitly:
   - Direct bumps, all within the existing semver range: `@modelcontextprotocol/sdk` 1.27.1 → 1.30.0, `vitest`/`@vitest/coverage-v8` 4.1.4 → 4.1.10, `@anthropic-ai/dxt` 0.2.5 → 0.2.6. These cleared the `vite`, `postcss` and `nanoid` advisories.

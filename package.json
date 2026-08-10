@@ -2,7 +2,7 @@
   "name": "@aiondadotcom/mcp-ssh",
   "version": "1.3.8",
   "description": "MCP Agent for managing SSH hosts - A Model Context Protocol server for SSH operations",
-  "main": "server.mjs",
+  "main": "dist/server.js",
   "bin": {
     "mcp-ssh": "bin/mcp-ssh.js"
   },
@@ -13,13 +13,17 @@
   "scripts": {
     "start": "node bin/mcp-ssh.js",
     "dev": "node bin/mcp-ssh.js",
-    "build": "echo \"Build skipped\"",
+    "build": "tsc -p tsconfig.build.json",
     "build:dxt": "./scripts/build-dxt.sh",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run test",
+    "prepublishOnly": "npm run build && npm test",
     "version": "git add -A",
-    "postversion": "git push && git push --tags"
+    "postversion": "git push && git push --tags",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "prepare": "npm run build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "keywords": [
     "mcp",
@@ -51,12 +55,13 @@
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.6",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.11.26",
-    "@types/ssh2": "^1.15.0",
     "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.1",
     "tmp": ">=0.2.6",
-    "ts-node": "^10.9.2",
     "typescript": "^5.4.3",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   },
   "overrides": {

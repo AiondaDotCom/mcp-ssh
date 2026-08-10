@@ -660,16 +660,27 @@ The DXT file will be available as a release asset for users to download and inst
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ```bash
-npm install
+npm install        # also compiles src/ -> dist/ via the prepare script
+npm run build      # tsc
+npm run typecheck  # tsc --noEmit, strict for src/ and relaxed for tests
+npm run lint       # eslint with type-aware rules
 npm test           # vitest with coverage
 npm run test:watch # watch mode
 ```
 
-Two things to know before opening a PR:
+The server is written in TypeScript under `src/` and compiled to `dist/`, which is what
+`bin/mcp-ssh.js` loads and what ships to npm. `dist/` is not in git — a fresh checkout gets
+it from `npm install`.
+
+Three things to know before opening a PR:
 
 - **Coverage is a build gate.** `vitest.config.mjs` pins statements, branches, functions and
-  lines of `server.mjs` at 100%, so a change that adds an untested line fails CI. If a branch
+  lines of `src/` at 100%, so a change that adds an untested line fails CI. If a branch
   is genuinely unreachable, removing it is usually better than working around the threshold.
+- **Lint rules are calibrated, not stock.** Where a rule is relaxed, the reason is in a comment
+  next to it. `prefer-nullish-coalescing` in particular exempts strings and numbers on purpose:
+  `||` and `??` are *not* interchangeable for environment variables (a stripped launcher env
+  reports an empty string, see issue #10) or for `timeout || DEFAULT`.
 - **CI runs on Linux and Windows** across Node 20, 22 and 24. Platform-specific code paths are
   tested from either OS by re-importing the module with `process.platform` faked — see
   `loadServerAs()` in `server.test.mjs` — rather than by skipping tests on one platform.
@@ -682,8 +693,22 @@ MIT License - see LICENSE file for details.
 
 ```
 mcp-ssh/
-├── server.mjs                 # Main MCP server implementation (self-contained)
-├── server.test.mjs            # Test suite (vitest)
+├── src/                       # TypeScript sources
+│   ├── server.ts              # Entry point: MCP server wiring and main()
+│   ├── tools.ts               # Tool definitions and dispatch
+│   ├── ssh-client.ts          # All ssh/scp operations
+│   ├── ssh-config-parser.ts   # Host discovery from config and known_hosts
+│   ├── config-values.ts       # ssh-config value normalization
+│   ├── platform.ts            # Platform detection, binary resolution, logging
+│   ├── types.ts               # Shared types
+│   └── server.test.ts         # Test suite (vitest)
+├── dist/                      # Compiled output (generated, not in git)
+├── bin/
+│   └── mcp-ssh.js             # Executable entry point (loads dist/server.js)
+├── tsconfig.json              # Strict compiler options for src/
+├── tsconfig.build.json        # Build config (excludes tests)
+├── tsconfig.test.json         # Relaxed options for test files
+├── eslint.config.mjs          # typescript-eslint, type-aware rules
 ├── vitest.config.mjs          # Test and coverage configuration
 ├── manifest.json              # DXT package manifest
 ├── package.json               # Dependencies and scripts
@@ -694,8 +719,6 @@ mcp-ssh/
 ├── .gitattributes             # Forces LF checkout on every platform
 ├── start.sh                   # Development startup script
 ├── start-silent.sh            # Silent startup script
-├── bin/
-│   └── mcp-ssh.js             # Executable entry point (imports and calls main())
 ├── scripts/
 │   └── build-dxt.sh           # DXT package build script
 └── doc/                       # Documentation assets

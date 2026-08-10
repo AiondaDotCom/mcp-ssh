@@ -24,12 +24,17 @@ test-ssh/
 vitest.config.mjs
 coverage/
 
+# TypeScript sources and build config - the package ships compiled dist/
+tsconfig.json
+tsconfig.build.json
+eslint.config.mjs
+
 # Generated files
 *.tgz
 
 # Keep these files for npm package
 !package.json
 !README.md
-!server.mjs
+!dist/
 !LICENSE
 !CHANGELOG.md

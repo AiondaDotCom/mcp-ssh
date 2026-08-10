@@ -1,0 +1,22 @@
+{
+  // Test files are checked with a lighter set of rules than the production
+  // sources. Mock child processes, partially-typed spies and index-signature
+  // access are the normal vocabulary of a test suite; enforcing the full strict
+  // set there produces noise rather than safety, and the tests themselves are
+  // what validates behaviour. src/ stays under the strict config.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "noImplicitAny": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "strictNullChecks": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  // The base config excludes tests; clear that here or the include below
+  // resolves to nothing.
+  "exclude": [],
+  "include": ["src/**/*.test.ts", "src/test-helpers.ts"]
+}
