@@ -71,4 +71,4 @@ The package is configured with:
 - Scoped name: `@aiondadotcom/mcp-ssh`
 - Public access
 - Binary: `mcp-ssh` command
-- Entry point: `server.mjs`
+- Entry point: `dist/server.js`, compiled from `src/` (`prepublishOnly` runs the build and the test suite)

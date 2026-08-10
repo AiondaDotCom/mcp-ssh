@@ -55,9 +55,11 @@ npm install -g @aiondadotcom/mcp-ssh
 ```bash
 git clone https://github.com/aiondadotcom/mcp-ssh.git
 cd mcp-ssh
-npm install
+npm install   # also compiles src/ -> dist/
 npm start
 ```
+The server is TypeScript under `src/`; `npm install` builds it. After editing sources run
+`npm run build` (or `npm test`, which reads `src/` directly).
 
 ## Example Usage
 
@@ -683,7 +685,7 @@ Three things to know before opening a PR:
   reports an empty string, see issue #10) or for `timeout || DEFAULT`.
 - **CI runs on Linux and Windows** across Node 20, 22 and 24. Platform-specific code paths are
   tested from either OS by re-importing the module with `process.platform` faked — see
-  `loadServerAs()` in `server.test.mjs` — rather than by skipping tests on one platform.
+  `loadServerAs()` in `src/test-helpers.ts` — rather than by skipping tests on one platform.
 
 ## License
 

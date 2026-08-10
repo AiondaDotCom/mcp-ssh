@@ -29,12 +29,28 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           
+      # `prepare` compiles src/ -> dist/ as part of the install; `prepublishOnly`
+      # rebuilds and re-runs the suite before the publish itself.
       - name: Install dependencies
         run: npm ci
-        
-      - name: Run tests (if any)
-        run: npm test --if-present
-        
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      # dist/ is what actually ships — verify it starts before publishing it.
+      - name: Smoke-test the compiled server
+        run: |
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | MCP_SILENT=true node bin/mcp-ssh.js \
+            | grep -q '"serverInfo"'
+
+
       - name: Bump version (if manual trigger)
         if: github.event_name == 'workflow_dispatch'
         run: npm version ${{ github.event.inputs.version }} --no-git-tag-version
