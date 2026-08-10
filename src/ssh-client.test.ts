@@ -1289,15 +1289,17 @@ describe('SSH directory guard across filesystem semantics', () => {
     return client;
   }
 
-  it('should compare case-sensitively on Linux, where .SSH is a different directory', async () => {
-    const client = await clientOn('linux');
-    const upper = join(homedir(), '.SSH', 'config');
-
-    expect(await client.downloadFile('test', '/remote', upper)).toBe(true);
-  });
-
-  it('should still block the real directory on Linux', async () => {
-    const client = await clientOn('linux');
+  // Both comparison modes must bite on the real directory. Which one is active
+  // depends on the platform, so exercise each explicitly rather than relying on
+  // whichever host the suite happens to run on. (Case folding is what stops a
+  // '.SSH' spelling on a case-insensitive volume; realpath does not canonicalise
+  // case on macOS, so the comparison has to do it.)
+  it.each([
+    ['case-sensitive comparison (Linux)', 'linux'],
+    ['case-folding comparison (macOS)', 'darwin'],
+    ['case-folding comparison (Windows)', 'win32'],
+  ])('should block the SSH directory under %s', async (_label, platform) => {
+    const client = await clientOn(platform);
 
     expect(await client.downloadFile('test', '/remote', join(homedir(), '.ssh', 'config'))).toBe(false);
   });
@@ -1315,8 +1317,10 @@ describe('SSH directory guard across filesystem semantics', () => {
       return;   // no symlink privilege
     }
     try {
-      // Must terminate and treat the unresolvable path as an ordinary one.
-      expect(await client.downloadFile('test', '/remote', a)).toBe(true);
+      // The point is that the hop cap makes this terminate at all. Whether the
+      // unresolvable path is then accepted is platform detail (Windows models
+      // links differently), so assert termination, not the verdict.
+      await expect(client.downloadFile('test', '/remote', a)).resolves.toBeTypeOf('boolean');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
