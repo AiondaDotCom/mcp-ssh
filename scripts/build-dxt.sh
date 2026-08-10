@@ -30,6 +30,11 @@ BUILD_DIR="build"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
+# The entry point (bin/mcp-ssh.js) loads dist/, which is compiled from src/ and
+# not tracked in git — build it before packing or the extension ships empty.
+echo -e "${YELLOW}Building TypeScript sources...${NC}"
+npm run build
+
 echo -e "${YELLOW}Creating DXT package...${NC}"
 
 # Get version from package.json
