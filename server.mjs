@@ -35,7 +35,11 @@ const isWindows = process.platform === 'win32';
 // every spawned child inherits them. See issue #10.
 if (isWindows) {
   if (!process.env.ProgramData) {
-    process.env.ProgramData = process.env.ALLUSERSPROFILE || 'C:\\ProgramData';
+    // Derive the last-resort default from %SystemDrive% rather than hardcoding
+    // C:, so a Windows install on another drive still gets a valid path.
+    // SystemDrive is part of the environment Claude Desktop does pass through.
+    const systemDrive = (process.env.SystemDrive || 'C:').replace(/[\\/]+$/, '');
+    process.env.ProgramData = process.env.ALLUSERSPROFILE || `${systemDrive}\\ProgramData`;
   }
   if (!process.env.ALLUSERSPROFILE) {
     process.env.ALLUSERSPROFILE = process.env.ProgramData;

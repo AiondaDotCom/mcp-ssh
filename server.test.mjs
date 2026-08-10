@@ -33,9 +33,18 @@ import { SSHConfigParser, SSHClient, main, SSH_BIN, SCP_BIN } from './server.mjs
 // Without this, ~14 tests silently assert POSIX-only behaviour (chmod 600
 // checks, the /bin/sh askpass helper, `detached`, a bare 'ssh' argv[0]) and fail
 // when the suite runs on Windows.
+// Variables server.mjs writes to process.env at import time (the Windows
+// ProgramData normalization). They are always saved and restored, whether or not
+// a test overrides them — otherwise the first Windows-flavoured import leaks its
+// mutation into every later test and makes those branches look covered when
+// nothing asserted them.
+const ENV_MUTATED_AT_IMPORT = ['ProgramData', 'ALLUSERSPROFILE'];
+
 async function loadServerAs(platform, envOverrides = {}) {
   const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   const realEnv = {};
+
+  for (const key of ENV_MUTATED_AT_IMPORT) realEnv[key] = process.env[key];
 
   for (const [key, value] of Object.entries(envOverrides)) {
     realEnv[key] = process.env[key];
@@ -51,10 +60,16 @@ async function loadServerAs(platform, envOverrides = {}) {
     // resetModules re-runs the vi.mock factory, so these are new spies — not the
     // ones bound by the static import above.
     const fs = await import('fs/promises');
-    return { ...server, fs };
+    // Snapshot the variables the module writes at import time. The finally block
+    // below restores process.env immediately, so a test that wants to assert on
+    // the normalization has to read it from here.
+    const envAfterImport = Object.fromEntries(
+      ENV_MUTATED_AT_IMPORT.map(key => [key, process.env[key]])
+    );
+    return { ...server, fs, envAfterImport };
   } finally {
     Object.defineProperty(process, 'platform', realPlatform);
-    for (const key of Object.keys(envOverrides)) {
+    for (const key of new Set([...ENV_MUTATED_AT_IMPORT, ...Object.keys(envOverrides)])) {
       if (realEnv[key] === undefined) delete process.env[key];
       else process.env[key] = realEnv[key];
     }
@@ -1850,5 +1865,118 @@ describe('output truncation', () => {
     const result = await client.runRemoteCommand('test', 'bigcmd');
     const markers = result.stderr.match(/\[Stderr truncated/g) || [];
     expect(markers).toHaveLength(1);
+  });
+});
+
+// =============================================================================
+// Windows ProgramData normalization (issue #10)
+//
+// Claude Desktop launches the extension with a stripped, allow-listed
+// environment that omits %ProgramData%. Win32-OpenSSH resolves it at startup to
+// find its global config (%ProgramData%\ssh\) and exits 255 with no output when
+// it is unset, so every spawned ssh/scp fails while the same command works from
+// a normal shell. server.mjs restores the variable at import time; these tests
+// pin that behaviour, including that it stays out of the way on POSIX.
+// =============================================================================
+
+describe('Windows ProgramData normalization', () => {
+  it('should default ProgramData and ALLUSERSPROFILE when both are missing', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+      SystemDrive: 'C:',
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('C:\\ProgramData');
+    expect(win.envAfterImport.ALLUSERSPROFILE).toBe('C:\\ProgramData');
+  });
+
+  it('should derive the default from %SystemDrive% rather than hardcoding C:', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+      SystemDrive: 'D:',
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('D:\\ProgramData');
+  });
+
+  it('should tolerate a %SystemDrive% that carries a trailing separator', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+      SystemDrive: 'E:\\',
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('E:\\ProgramData');
+  });
+
+  it('should fall back to C: when %SystemDrive% is missing too', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+      SystemDrive: undefined,
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('C:\\ProgramData');
+  });
+
+  it('should prefer an existing ALLUSERSPROFILE over the drive-based default', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: 'X:\\CustomProgramData',
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('X:\\CustomProgramData');
+  });
+
+  it('should leave an already-set ProgramData untouched and backfill ALLUSERSPROFILE', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: 'Q:\\Existing',
+      ALLUSERSPROFILE: undefined,
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('Q:\\Existing');
+    expect(win.envAfterImport.ALLUSERSPROFILE).toBe('Q:\\Existing');
+  });
+
+  it('should not touch either variable when both are already set', async () => {
+    const win = await loadServerAs('win32', {
+      ProgramData: 'Q:\\Existing',
+      ALLUSERSPROFILE: 'R:\\Other',
+    });
+
+    expect(win.envAfterImport.ProgramData).toBe('Q:\\Existing');
+    expect(win.envAfterImport.ALLUSERSPROFILE).toBe('R:\\Other');
+  });
+
+  it('should not invent the variables on POSIX', async () => {
+    const posix = await loadServerAs('linux', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+    });
+
+    expect(posix.envAfterImport.ProgramData).toBeUndefined();
+    expect(posix.envAfterImport.ALLUSERSPROFILE).toBeUndefined();
+  });
+
+  it('should reach the spawned ssh process through the inherited environment', async () => {
+    // The whole point of issue #10: key-auth hosts get no env override, so the
+    // child inherits process.env and must find ProgramData there.
+    const win = await loadServerAs('win32', {
+      ProgramData: undefined,
+      ALLUSERSPROFILE: undefined,
+      SystemDrive: 'C:',
+    });
+    const client = new win.SSHClient();
+    win.fs.readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+    client._spawn = createMockSpawn({ stdout: 'ok\n', code: 0 });
+
+    await client.runRemoteCommand('test', 'echo ok');
+
+    // No password -> no explicit env, so the child inherits the parent's, which
+    // the import-time normalization has already repaired.
+    expect(client._spawn.mock.calls[0][2].env).toBeUndefined();
+    expect(win.envAfterImport.ProgramData).toBe('C:\\ProgramData');
   });
 });
