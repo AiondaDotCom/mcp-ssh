@@ -1194,9 +1194,27 @@ describe('SSHClient', () => {
 describe('MCP Server Handlers', () => {
   let server;
   let handlers;
+  let clientSpies;
+
+  afterEach(() => {
+    for (const spy of clientSpies) spy.mockRestore();
+  });
 
   beforeEach(async () => {
     vi.clearAllMocks();
+
+    // These tests drive the real SSHClient that main() constructs, so every tool
+    // call would otherwise spawn an actual ssh/scp process against 1.2.3.4 and
+    // block on the network. Stubbing the three process-starting methods keeps
+    // the block a dispatch test — which is all it asserts — instead of a slow,
+    // network-dependent one that blows the 5s timeout on Windows CI runners.
+    // The methods themselves are covered by the SSHClient tests above.
+    clientSpies = [
+      vi.spyOn(SSHClient.prototype, 'runRemoteCommand')
+        .mockResolvedValue({ stdout: 'connected', stderr: '', code: 0 }),
+      vi.spyOn(SSHClient.prototype, 'uploadFile').mockResolvedValue(true),
+      vi.spyOn(SSHClient.prototype, 'downloadFile').mockResolvedValue(true),
+    ];
 
     // Capture the request handlers that main() registers
     handlers = {};

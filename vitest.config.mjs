@@ -2,6 +2,10 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Windows CI runners are markedly slower than a dev machine (the suite takes
+    // ~0.5s locally but ~15s there), and a few tests allocate 10MB buffers or
+    // re-import the module graph. The 5s default left too little headroom.
+    testTimeout: 15000,
     coverage: {
       provider: 'v8',
       // server.mjs is the whole production implementation (it is deliberately
