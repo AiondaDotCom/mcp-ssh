@@ -13,6 +13,7 @@ start-silent.sh
 
 # Git and CI/CD
 .git/
+.gitattributes
 .github/
 .gitignore
 *.log
@@ -27,10 +28,12 @@ coverage/
 # TypeScript sources and build config - the package ships compiled dist/
 tsconfig.json
 tsconfig.build.json
+tsconfig.test.json
 eslint.config.mjs
 
 # Generated files
 *.tgz
+build/
 
 # Keep these files for npm package
 !package.json
