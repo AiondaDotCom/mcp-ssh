@@ -55,7 +55,17 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: npm version ${{ github.event.inputs.version }} --no-git-tag-version
         
+      # Idempotent: a release may be created for a version that was already
+      # published by hand. Re-publishing the same version is a hard error, so
+      # check first and skip rather than failing the whole workflow.
       - name: Publish to NPM
-        run: npm publish
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm — skipping publish."
+          else
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

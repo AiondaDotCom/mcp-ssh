@@ -54,7 +54,7 @@
     "ssh-config": "^5.0.0"
   },
   "devDependencies": {
-    "@anthropic-ai/dxt": "^0.2.6",
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.11.26",
     "@vitest/coverage-v8": "^4.1.10",
