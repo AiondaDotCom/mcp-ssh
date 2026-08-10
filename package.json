@@ -45,21 +45,29 @@
     "access": "public"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "glob": "^11.0.3",
     "ssh-config": "^5.0.0"
   },
   "devDependencies": {
-    "@anthropic-ai/dxt": "^0.2.5",
+    "@anthropic-ai/dxt": "^0.2.6",
     "@types/node": "^20.11.26",
     "@types/ssh2": "^1.15.0",
-    "@vitest/coverage-v8": "^4.1.4",
-    "tmp": ">=0.2.4",
+    "@vitest/coverage-v8": "^4.1.10",
+    "tmp": ">=0.2.6",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.3",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.10"
   },
   "overrides": {
-    "tmp": ">=0.2.4"
+    "tmp": ">=0.2.6",
+    "brace-expansion": ">=5.0.9",
+    "fast-uri": ">=3.1.5",
+    "ip-address": ">=10.5.0",
+    "hono": ">=4.13.1",
+    "@hono/node-server": ">=2.0.5",
+    "body-parser": ">=2.3.0",
+    "qs": ">=6.15.2",
+    "express-rate-limit": ">=8.5.1"
   }
 }

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- Resolved all 17 open `npm audit` advisories (12 high, 4 moderate, 1 low) that accumulated since the 1.3.7 cleanup. `npm audit` now reports zero vulnerabilities again. `npm audit fix` could not be used — it aborts with an internal npm error (`Cannot read properties of null (reading 'edgesOut')`) on this tree's `overrides` — so the fixes are pinned explicitly:
+  - Direct bumps, all within the existing semver range: `@modelcontextprotocol/sdk` 1.27.1 → 1.30.0, `vitest`/`@vitest/coverage-v8` 4.1.4 → 4.1.10, `@anthropic-ai/dxt` 0.2.5 → 0.2.6. These cleared the `vite`, `postcss` and `nanoid` advisories.
+  - Raised the existing `tmp` override from `>=0.2.4` to `>=0.2.6` (GHSA path traversal via unsanitized prefix/postfix), which cleared the whole `@anthropic-ai/dxt → @inquirer/prompts → @inquirer/editor → external-editor → tmp` chain.
+  - New overrides for the transitive HTTP-stack advisories reachable through `@modelcontextprotocol/sdk`: `brace-expansion`, `fast-uri`, `ip-address`, `hono`, `@hono/node-server`, `body-parser`, `qs`, `express-rate-limit`. Each is pinned to the lowest version that carries the fix. As in 1.3.7, none of this code is reachable from this package: it belongs to the SDK's HTTP/SSE transport, and mcp-ssh only ever loads `server/stdio.js`.
+- Verified after the bumps: full suite green, `npm ci` reproducible from the lockfile, and the real server answers `initialize` and `tools/list` correctly over STDIO.
+
+### Fixed
+- **Multi-alias hosts (fixes #12)**: A host declared under several aliases (`Host docker-lxc hlab`) was unreachable under *any* of its names. `ssh-config@5` returns a plain string for a single-token value but an array of token objects (`{val, separator, quoted}`) once a directive carries more than one token; `extractHostsFromConfig` stored that array in `alias` verbatim, so every strict comparison downstream (`_assertKnownHostAlias`, `getHostInfo`, `getPasswordForHost`, `getAllKnownHosts`) compared a string against an array and never matched. The host was listed by `listKnownHosts` but rejected by the known-host gate before `ssh` was ever spawned. ssh-config values are now normalized once at parse time: `alias` keeps the first alias (output shape unchanged), a new `aliases` field carries the full list, and matching goes through a shared `hostMatchesAlias()` helper. Contributed by @badigit.
+- **Wildcard blocks with negations**: `Host * !bastion` was emitted as a connectable host if it carried a `HostName`. The old `section.value !== '*'` check could not match a multi-token value, which is an array. Blocks consisting only of wildcards and negated patterns are now skipped as the defaults blocks they are.
+- **Multi-token directives**: `ProxyCommand`, `SendEnv`, `IPQoS` and friends were surfaced in `listKnownHosts` output as arrays of token objects instead of readable strings. They are now flattened.
+
+### Changed
+- **Windows test suite**: 14 tests silently asserted POSIX-only behaviour (the `chmod 600` config check, the `/bin/sh` askpass helper, `detached`, a bare `ssh` as argv[0]) and failed when the suite ran on Windows. Both platform paths are now asserted explicitly by re-importing the module with `process.platform` faked, so the suite is meaningful and green on either OS. `SSH_BIN`/`SCP_BIN` are exported so tests assert against the binary the module actually resolved.
+- **CI**: the test matrix now runs on `windows-latest` in addition to `ubuntu-latest`, across Node 20/22/24.
+- **Coverage**: `server.mjs` is at 100% statements, branches, functions and lines, and `vitest.config.mjs` pins those thresholds so a change adding an untested line or branch fails the build.
+- Dropped the `process.env.Path` fallback in `resolveExecutable()`: Node exposes `process.env` case-insensitively on Windows, so `process.env.PATH` already resolves a variable spelled `Path`. The fallback was unreachable.
+
 ## [1.3.8] - 2026-04-14
 
 ### Fixed

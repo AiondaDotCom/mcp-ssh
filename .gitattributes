@@ -1,0 +1,14 @@
+# Force LF in the working tree on every platform.
+#
+# Windows checks out CRLF by default (core.autocrlf=true). server.mjs starts
+# with a `#!/usr/bin/env node` shebang, and Vite's SSR transform — which vitest
+# runs the module through — fails to parse that shebang when the line ends in
+# CRLF: the transform hoists the imports above it and then chokes on
+# "Invalid Character `!`", so the whole suite dies with a SyntaxError before a
+# single test runs. Pinning LF keeps the suite behaving identically everywhere.
+* text=auto eol=lf
+
+# Shell scripts must keep LF to stay executable on POSIX.
+*.sh text eol=lf
+
+*.tgz binary
