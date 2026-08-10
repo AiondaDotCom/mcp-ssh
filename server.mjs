@@ -35,7 +35,9 @@ const isWindows = process.platform === 'win32';
 // already searches PATH safely).
 function resolveExecutable(name) {
   if (!isWindows) return name;
-  const pathDirs = (process.env.PATH || process.env.Path || '').split(';');
+  // No `|| process.env.Path` fallback: Node exposes process.env case-insensitively
+  // on Windows, so process.env.PATH already resolves a variable spelled `Path`.
+  const pathDirs = (process.env.PATH || '').split(';');
   const exts = (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';');
   for (const dir of pathDirs) {
     if (!dir) continue;
@@ -874,4 +876,7 @@ async function main() {
 // caused the server to silently exit when launched via bin/mcp-ssh.js on
 // Windows MCP clients (issue #8). The bin wrapper now imports and calls
 // main() explicitly.
-export { SSHConfigParser, SSHClient, debugLog, main };
+// SSH_BIN/SCP_BIN are exported so tests can assert against the binary this
+// module actually resolved instead of hardcoding 'ssh'/'scp' — on Windows they
+// are absolute paths (see resolveExecutable).
+export { SSHConfigParser, SSHClient, debugLog, main, SSH_BIN, SCP_BIN };
