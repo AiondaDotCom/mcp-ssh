@@ -1146,6 +1146,9 @@ describe('localPath must not target the SSH configuration directory', () => {
     expect(await client.downloadFile('test', '/tmp/payload', sshDir)).toBe(false);
   });
 
+  // Deliberately points at a file that need not exist: on a fresh machine
+  // ~/.ssh is absent, and realpath does not resolve a link with a missing
+  // target — the exact case a planted link would exploit.
   it('should refuse a symlink that points into ~/.ssh', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'mcp-ssh-link-'));
     const link = join(dir, 'innocent.txt');
@@ -1297,6 +1300,26 @@ describe('SSH directory guard across filesystem semantics', () => {
     const client = await clientOn('linux');
 
     expect(await client.downloadFile('test', '/remote', join(homedir(), '.ssh', 'config'))).toBe(false);
+  });
+
+  it('should not hang on a symlink loop', async () => {
+    const client = await clientOn('linux');
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-ssh-loop-'));
+    const a = join(dir, 'a');
+    const b = join(dir, 'b');
+    try {
+      symlinkSync(b, a);
+      symlinkSync(a, b);
+    } catch {
+      rmSync(dir, { recursive: true, force: true });
+      return;   // no symlink privilege
+    }
+    try {
+      // Must terminate and treat the unresolvable path as an ordinary one.
+      expect(await client.downloadFile('test', '/remote', a)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('should accept a destination whose top-level directory does not exist', async () => {

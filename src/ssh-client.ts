@@ -12,10 +12,10 @@
 import { spawn as nodeSpawn, execFile } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { promisify } from 'node:util';
-import { realpathSync, mkdtempSync, rmSync } from 'node:fs';
+import { realpathSync, readlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { writeFile, chmod } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve, sep, dirname } from 'node:path';
 
 import { SSHConfigParser } from './ssh-config-parser.js';
 import { hostMatchesAlias } from './config-values.js';
@@ -33,6 +33,8 @@ const execFileAsync = promisify(execFile);
 
 const MAX_OUTPUT_SIZE = 10 * 1024 * 1024; // 10MB limit
 const DEFAULT_TIMEOUT = 30000;
+/** Upper bound when following a symlink chain, so a link loop cannot hang the check. */
+const MAX_SYMLINK_HOPS = 16;
 const STRICT_HOST_KEY_CHECKING = ['-o', 'StrictHostKeyChecking=accept-new'];
 
 type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -451,7 +453,21 @@ export class SSHClient {
  * walk up to the nearest existing ancestor and resolve that.
  */
 function realpathish(p: string): string {
-  const abs = resolve(p);
+  let abs = resolve(p);
+
+  // realpath refuses a symlink whose target does not exist yet, which is exactly
+  // the shape that matters here: a link planted at ~/.ssh/<not-yet-created>.
+  // Follow the chain by hand first. The hop cap breaks symlink loops.
+  for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {
+    let target: string;
+    try {
+      target = readlinkSync(abs);
+    } catch {
+      break;   // not a symlink (or unreadable) — nothing more to follow
+    }
+    abs = resolve(dirname(abs), target);
+  }
+
   const segments = abs.split(sep);
   // Longest prefix first. i stops at 2 because the one-segment prefix is the
   // filesystem root, which always resolves and would make the loop pointless.
