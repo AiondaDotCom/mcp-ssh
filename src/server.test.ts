@@ -1,16 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { createRequire } from 'module';
-import { EventEmitter } from 'events';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const sshConfigLib = require('ssh-config');
 
 // Mock fs/promises (used via ESM import in server.mjs)
-vi.mock('fs/promises', async () => {
-  const actual = await vi.importActual('fs/promises');
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual('node:fs');
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual('node:fs/promises');
   return {
     ...actual,
     readFile: vi.fn(),
@@ -21,8 +26,8 @@ vi.mock('fs/promises', async () => {
   };
 });
 
-import { readFile, stat, writeFile, chmod } from 'fs/promises';
-import { SSHConfigParser, SSHClient, main, SSH_BIN, SCP_BIN } from './server.mjs';
+import { readFile, stat, writeFile, chmod } from 'node:fs/promises';
+import { SSHConfigParser, SSHClient, main, SSH_BIN, SCP_BIN } from './server.js';
 
 // Load a fresh copy of server.mjs with process.platform (and optionally parts of
 // the environment) faked, so both the POSIX and the Windows branches can be
@@ -55,11 +60,11 @@ async function loadServerAs(platform, envOverrides = {}) {
   vi.resetModules();
 
   try {
-    const server = await import('./server.mjs');
+    const server = await import('./server.js');
     // fs/promises has to be re-imported from the same fresh module graph:
     // resetModules re-runs the vi.mock factory, so these are new spies — not the
     // ones bound by the static import above.
-    const fs = await import('fs/promises');
+    const fs = await import('node:fs/promises');
     // Snapshot the variables the module writes at import time. The finally block
     // below restores process.env immediately, so a test that wants to assert on
     // the normalization has to read it from here.
@@ -556,15 +561,10 @@ Host main
     });
 
     it('should handle errors in glob/existsSync gracefully', () => {
-      // Temporarily break require('fs').existsSync to trigger catch
-      const fs = require('fs');
-      const origExistsSync = fs.existsSync;
-      fs.existsSync = () => { throw new Error('fs broken'); };
+      vi.mocked(existsSync).mockImplementationOnce(() => { throw new Error('fs broken'); });
 
       const result = parser.expandIncludePath('/some/path/file', '/base');
       expect(result).toEqual([]);
-
-      fs.existsSync = origExistsSync;
     });
   });
 });
@@ -1235,8 +1235,8 @@ describe('MCP Server Handlers', () => {
     handlers = {};
 
     // Mock the MCP SDK Server and Transport
-    const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-    const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+    const sdkTypes = await import('@modelcontextprotocol/sdk/types.js');
 
     // Save original and mock
     const origSetRequestHandler = Server.prototype.setRequestHandler;
@@ -1244,9 +1244,9 @@ describe('MCP Server Handlers', () => {
 
     Server.prototype.setRequestHandler = function(schema, handler) {
       // Store by schema name
-      if (schema === require('@modelcontextprotocol/sdk/types.js').ListToolsRequestSchema) {
+      if (schema === sdkTypes.ListToolsRequestSchema) {
         handlers.listTools = handler;
-      } else if (schema === require('@modelcontextprotocol/sdk/types.js').CallToolRequestSchema) {
+      } else if (schema === sdkTypes.CallToolRequestSchema) {
         handlers.callTool = handler;
       }
     };
@@ -1445,7 +1445,7 @@ describe('MCP Server Handlers', () => {
 
 describe('main() error handling', () => {
   it('should handle startup errors gracefully', async () => {
-    const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
     const origConnect = Server.prototype.connect;
 
     Server.prototype.connect = vi.fn().mockRejectedValue(new Error('transport failed'));
@@ -1978,5 +1978,81 @@ describe('Windows ProgramData normalization', () => {
     // the import-time normalization has already repaired.
     expect(client._spawn.mock.calls[0][2].env).toBeUndefined();
     expect(win.envAfterImport.ProgramData).toBe('C:\\ProgramData');
+  });
+});
+
+// =============================================================================
+// Defensive paths that only the refactor to explicit modules made reachable
+// =============================================================================
+
+describe('non-Error failures', () => {
+  let parser;
+
+  beforeEach(() => {
+    parser = new SSHConfigParser();
+    vi.clearAllMocks();
+  });
+
+  it('should stringify a non-Error rejection while reading the config', async () => {
+    readFile.mockRejectedValue('not an Error object');
+
+    // Reaches the String(error) side of the shared error formatter.
+    await expect(parser.parseConfig()).resolves.toEqual([]);
+  });
+
+  it('should stringify a non-Error thrown during startup', async () => {
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+    const origConnect = Server.prototype.connect;
+    Server.prototype.connect = vi.fn().mockRejectedValue('transport exploded');
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+
+    try {
+      await main();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      Server.prototype.connect = origConnect;
+      exitSpy.mockRestore();
+    }
+  });
+});
+
+describe('parser edge shapes', () => {
+  let parser;
+
+  beforeEach(() => {
+    parser = new SSHConfigParser();
+    vi.clearAllMocks();
+  });
+
+  it('should handle a Host section that carries no directives at all', () => {
+    // `Host x` with nothing under it: ssh-config still yields a section, and it
+    // has no `config` array to walk.
+    const hosts = parser.extractHostsFromConfig([{ param: 'Host', value: 'bare' }], '/test');
+    expect(hosts).toEqual([]);
+  });
+});
+
+describe('remote command exit codes', () => {
+  let client;
+
+  beforeEach(() => {
+    client = new SSHClient();
+    vi.clearAllMocks();
+    readFile.mockResolvedValue(`Host test\n    HostName 1.2.3.4\n`);
+  });
+
+  it('should report code 0 when the process closes with a null code', async () => {
+    // ssh killed by a signal exits with a null code and no timeout involved.
+    client._spawn = vi.fn(() => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn();
+      setTimeout(() => child.emit('close', null), 5);
+      return child;
+    });
+
+    const result = await client.runRemoteCommand('test', 'whatever');
+    expect(result.code).toBe(0);
   });
 });
