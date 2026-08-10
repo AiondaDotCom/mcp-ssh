@@ -333,23 +333,69 @@ Host lb-b
     Hostname 198.51.100.201
     Port 22077
     User root
+
+# One host reachable under several aliases - both names work
+Host docker-lxc hlab
+    Hostname 10.9.0.105
+    User root
 ```
 
 This configuration demonstrates:
 - **Global settings**: `ServerAliveInterval` to keep connections alive
 - **Custom ports**: Non-standard SSH ports for security
 - **Multiple users**: Different user accounts for the same host (e.g., `prod` and `root@prod`)
+- **Multiple aliases**: One host declared under several names (e.g., `docker-lxc hlab`) — reachable under each
 - **Jump hosts**: Using `ProxyJump` to access servers through bastion hosts
 - **IPv6 addresses**: Modern networking support
 - **Identity files**: Specific SSH keys for different servers
 - **Security options**: `IdentitiesOnly yes` to use only specified keys
 - **Password authentication**: `# @password:` annotations for devices without SSH key support (e.g., routers, switches) or for passphrase-protected keys
 
+#### Which Hosts Are Discovered
+
+`listKnownHosts()` reports every connectable host it finds in `~/.ssh/config` (including
+everything pulled in through `Include`), followed by any additional hostnames from
+`~/.ssh/known_hosts`. Three rules decide what counts as connectable:
+
+**Multi-alias blocks work under every alias.** `Host` takes a list of patterns, not a single
+name, so a block can declare several aliases at once:
+
+```ssh-config
+Host docker-lxc hlab
+    Hostname 10.9.0.105
+    User root
+```
+
+Both `docker-lxc` and `hlab` reach this host. The response carries the full list in an
+`aliases` field, while `alias` holds the first one.
+
+**Defaults blocks are skipped.** A block whose patterns are only wildcards and negations
+sets defaults for other hosts — it is not something you can connect to, so it is left out
+of the host list:
+
+```ssh-config
+Host *
+    ServerAliveInterval 55
+
+Host * !bastion          # "everything except bastion" — a defaults block, not a host
+    User deploy
+    IdentityFile ~/.ssh/id_deploy
+```
+
+(OpenSSH lets you negate a pattern with `!`. A negated match vetoes the whole line, which
+is why negation only makes sense as an exception to a wildcard.)
+
+**Hosts without a `Hostname` are skipped**, since there is nothing to connect to.
+
+Plain top-level directives such as a bare `ServerAliveInterval 55` are configuration for
+`ssh` itself and are ignored by host discovery — `ssh` still applies them, because every
+operation runs through your system's `ssh` binary.
+
 #### How MCP SSH Agent Uses Your Configuration
 
 The MCP SSH agent automatically discovers and uses your SSH configuration:
 
-1. **Host Discovery**: All hosts from `~/.ssh/config` are automatically available
+1. **Host Discovery**: Every connectable host from `~/.ssh/config` is available — see the rules above
 2. **Native SSH**: Uses your system's `ssh` command, so all config options work
 3. **Authentication**: Respects your SSH agent, key files, and authentication settings
 4. **Jump Hosts**: Supports complex proxy chains and bastion host setups
@@ -367,8 +413,9 @@ The MCP SSH agent automatically discovers and uses your SSH configuration:
 
 1. **Command not found**: Ensure `ssh` and `scp` are installed and in your PATH
 2. **Permission denied**: Check SSH key permissions and SSH agent
-3. **Host not found**: Verify host exists in `~/.ssh/config` or `~/.ssh/known_hosts`
+3. **Host not found**: Verify the host exists in `~/.ssh/config` or `~/.ssh/known_hosts`, and that its block has a `Hostname` — blocks without one, and pure defaults blocks such as `Host *`, are not connectable hosts. See [Which Hosts Are Discovered](#which-hosts-are-discovered)
 4. **Connection timeout**: Check network connectivity and firewall settings
+5. **Windows: every command fails with exit 255 and empty output**: Fixed after 1.3.8. Earlier versions inherit a stripped environment from the MCP host that omits `%ProgramData%`, which Win32-OpenSSH needs at startup. Upgrade, or add `"ProgramData": "C:\\ProgramData"` to the `env` block of your client configuration
 
 ### Debug Mode
 
@@ -612,6 +659,21 @@ The DXT file will be available as a release asset for users to download and inst
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+```bash
+npm install
+npm test           # vitest with coverage
+npm run test:watch # watch mode
+```
+
+Two things to know before opening a PR:
+
+- **Coverage is a build gate.** `vitest.config.mjs` pins statements, branches, functions and
+  lines of `server.mjs` at 100%, so a change that adds an untested line fails CI. If a branch
+  is genuinely unreachable, removing it is usually better than working around the threshold.
+- **CI runs on Linux and Windows** across Node 20, 22 and 24. Platform-specific code paths are
+  tested from either OS by re-importing the module with `process.platform` faked — see
+  `loadServerAs()` in `server.test.mjs` — rather than by skipping tests on one platform.
+
 ## License
 
 MIT License - see LICENSE file for details.
@@ -620,21 +682,25 @@ MIT License - see LICENSE file for details.
 
 ```
 mcp-ssh/
-├── server.mjs          # Main MCP server implementation
+├── server.mjs                 # Main MCP server implementation (self-contained)
+├── server.test.mjs            # Test suite (vitest)
+├── vitest.config.mjs          # Test and coverage configuration
 ├── manifest.json              # DXT package manifest
 ├── package.json               # Dependencies and scripts
 ├── README.md                  # Documentation
 ├── LICENSE                    # MIT License
 ├── CHANGELOG.md               # Release history
 ├── PUBLISHING.md              # Publishing instructions
+├── .gitattributes             # Forces LF checkout on every platform
 ├── start.sh                   # Development startup script
 ├── start-silent.sh            # Silent startup script
+├── bin/
+│   └── mcp-ssh.js             # Executable entry point (imports and calls main())
 ├── scripts/
 │   └── build-dxt.sh           # DXT package build script
-├── doc/
-│   ├── example.png            # Usage example screenshot
-│   └── Claude.png             # Claude Desktop integration example
 └── doc/                       # Documentation assets
+    ├── example.png            # Usage example screenshot
+    └── Claude.png             # Claude Desktop integration example
 ```
 
 ## About

@@ -18,7 +18,7 @@ This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) s
 ### Development Scripts
 - `./start.sh` - Start the server with debug output
 - `./start-silent.sh` - Start the server in silent mode (no debug output)
-- `node server.mjs` - Direct server execution
+- `node bin/mcp-ssh.js` - Direct server execution. **Not** `node server.mjs`: since 1.3.6 that file no longer auto-runs `main()`, so running it directly exits immediately (this caused the 1.3.8 regression)
 
 ### Publishing
 - `npm version patch|minor|major` - Bump version and create git tag
@@ -35,7 +35,10 @@ This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) s
 - `server.mjs` - Self-contained MCP server implementation that includes all functionality inline to avoid module resolution issues
 
 ### Other Files
-- `bin/mcp-ssh.js` - Binary wrapper for npx compatibility
+- `bin/mcp-ssh.js` - Binary wrapper for npx compatibility; the real entry point (imports and calls `main()`)
+- `server.test.mjs` - Test suite
+- `vitest.config.mjs` - Test and coverage configuration, including the 100% coverage thresholds
+- `.gitattributes` - Forces LF checkout on every platform (see Testing)
 
 ### Key Design Decisions
 1. **Native SSH Tools**: Uses system `ssh` and `scp` commands rather than JavaScript SSH libraries for reliability
@@ -51,6 +54,32 @@ The agent automatically discovers SSH hosts from:
 - `~/.ssh/known_hosts` - Additional hosts not in config
 
 Host discovery prioritizes SSH config entries first, then adds additional hosts from known_hosts.
+
+### ssh-config value normalization
+
+`ssh-config@5` returns a **plain string** for a single-token value but an **array of token
+objects** (`{val, separator, quoted}`) as soon as a multi-value directive carries more than one
+token — affecting `Host`, `Match`, `ProxyCommand`, `SendEnv`, `IPQoS`, `CanonicalDomains`,
+`GlobalKnownHostsFile`, `UserKnownHostsFile`. Everything must go through `configValueTokens()` /
+`configValueToString()`, which normalize both shapes at parse time. Comparing a raw
+`section.value` against a string silently fails for multi-token blocks; that was the cause of
+issue #12, where `Host docker-lxc hlab` was unreachable under *either* alias.
+
+Consequences to preserve:
+- `alias` holds the **first** alias (output shape for single-alias hosts is unchanged); `aliases`
+  holds the full list. Match through `hostMatchesAlias()`, never with a bare `===` on `alias`.
+- Blocks whose patterns are all wildcards or negations (`Host *`, `Host * !bastion`) are defaults
+  blocks, not connectable hosts, and are skipped.
+- Hosts without a `Hostname` are skipped.
+
+### Windows environment normalization
+
+Windows-only, at module load: `%ProgramData%` and `%ALLUSERSPROFILE%` are backfilled (default
+derived from `%SystemDrive%`). MCP hosts such as Claude Desktop launch the server with a
+stripped, allow-listed environment omitting them, and Win32-OpenSSH exits 255 with **no output**
+when `%ProgramData%` is unset — so every spawned `ssh`/`scp` fails while the same command works
+in a shell. See issue #10. This mutates `process.env` at import time, which the test helper has
+to save and restore (see below).
 
 ### Password Authentication
 
@@ -81,6 +110,33 @@ Host myrouter
 7. **runCommandBatch(hostAlias, commands)** - Execute multiple commands sequentially
 
 ## Testing and Debugging
+
+### Test Suite Invariants
+
+`vitest.config.mjs` pins **100% of statements, branches, functions and lines** of `server.mjs`
+and fails the build below that. `bin/mcp-ssh.js` is excluded (top-level await that starts a real
+server). When adding code, add the test with it; when a branch turns out to be unreachable,
+prefer deleting it over working around the threshold — that is how the dead
+`process.env.Path` fallback in `resolveExecutable()` was removed.
+
+**Platform-specific code is tested from either OS, never skipped.** `loadServerAs(platform, env)`
+in `server.test.mjs` re-imports `server.mjs` with `process.platform` (and optionally parts of the
+environment) faked, so the Windows branches are covered when running on macOS/Linux and vice
+versa. Things it has to handle, and that new tests must respect:
+- `vi.resetModules()` re-runs the `vi.mock('fs/promises')` factory, so the returned `fs` spies are
+  **new objects** — the statically imported `readFile`/`stat`/… are a different module instance.
+- `server.mjs` writes `ProgramData`/`ALLUSERSPROFILE` to `process.env` at import time. The helper
+  always saves and restores them (`ENV_MUTATED_AT_IMPORT`) and exposes `envAfterImport`, because
+  the restore happens before a test can assert. Without this, one Windows import leaks state into
+  later tests and makes those branches *look* covered while nothing asserts them.
+- Assert argv[0] against the exported `SSH_BIN`/`SCP_BIN`, not a literal `'ssh'` — on Windows they
+  are absolute paths.
+- The `MCP Server Handlers` block drives the real `SSHClient` from `main()`; its
+  process-starting methods are stubbed so tests never spawn actual `ssh`/`scp`.
+
+**CI** runs Linux and Windows across Node 20/22/24. `.gitattributes` forces an LF checkout on all
+platforms: with CRLF, Vite's SSR transform cannot parse the `#!/usr/bin/env node` shebang in
+`server.mjs` and the entire suite dies with a `SyntaxError` before any test runs. Do not remove it.
 
 ### Manual Testing
 ```bash
