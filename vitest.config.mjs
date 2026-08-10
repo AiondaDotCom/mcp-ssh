@@ -14,7 +14,7 @@ export default defineConfig({
       // it in a unit test would start a real MCP server on STDIO. types.ts is
       // excluded because it compiles to nothing executable.
       include: ['src/**/*.ts'],
-      exclude: ['src/**/*.test.ts', 'src/types.ts'],
+      exclude: ['src/**/*.test.ts', 'src/test-helpers.ts', 'src/types.ts'],
       reporter: ['text', 'json-summary', 'html'],
       // The suite covers every line, branch and function, on both the POSIX and
       // the Windows code paths. Keep it that way.
